@@ -2,9 +2,9 @@ name: macOS ARM64
 
 on:
   push:
-    branches: [ dev, main ]
+    branches: [ main ]
   pull_request:
-    branches: [ dev, main ]
+    branches: [ main ]
   release:
     types: [ published ]
 
@@ -110,7 +110,7 @@ jobs:
           FORMULA
 
           cat >> Formula/zstd-vk.rb << EOF
-            head "https://github.com/vibekernels/zstd-vk-macos-arm64.git", branch: "dev"
+            head "https://github.com/vibekernels/zstd-vk-macos-arm64.git", branch: "main"
 
             bottle do
               root_url "https://github.com/vibekernels/zstd-vk-macos-arm64/releases/download/${GITHUB_REF_NAME}"
