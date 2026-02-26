@@ -26,6 +26,14 @@ jobs:
           echo "CPPFLAGS=$CPPFLAGS"
           echo "LDFLAGS=$LDFLAGS"
           echo "MOREFLAGS=$MOREFLAGS"
+          echo "--- clang config ---"
+          cat /opt/homebrew/etc/clang/arm64-apple-darwin*.cfg 2>/dev/null || echo "no system config"
+          cat ~/.config/clang/arm64-apple-darwin*.cfg 2>/dev/null || echo "no user config"
+          echo "--- SDK ---"
+          xcrun --show-sdk-path 2>/dev/null || echo "no xcrun"
+          sw_vers
+          echo "--- clang verbose ---"
+          $(brew --prefix llvm)/bin/clang -v -mcpu=apple-m1 -E - < /dev/null 2>&1 | head -20
       - name: Build
         run: make V=1 CC="$(brew --prefix llvm)/bin/clang" MOREFLAGS="-mcpu=apple-m1"
       - name: Check
