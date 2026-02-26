@@ -1,0 +1,69 @@
+name: Build Homebrew Bottle
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  bottle:
+    permissions:
+      contents: write
+    runs-on: macos-14
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # tag=v6.0.2
+
+      - name: Install GCC
+        run: brew install gcc
+
+      - name: Build hybrid PGO binary
+        run: make -C programs zstd-hybrid-pgo
+
+      - name: Smoke test
+        run: ./programs/zstd -b
+
+      - name: Package bottle
+        run: |
+          TAG="$(echo "$GITHUB_REF" | sed -n 's_^refs/tags/__p')"
+          VERSION="$(echo "$TAG" | sed 's_^v__')"
+          OS_VERSION="$(sw_vers -productVersion | cut -d. -f1)"
+          case "$OS_VERSION" in
+            14) OS_TAG="arm64_sonoma" ;;
+            15) OS_TAG="arm64_sequoia" ;;
+            *)  OS_TAG="arm64_macos${OS_VERSION}" ;;
+          esac
+
+          BOTTLE_DIR="zstd-vk/${VERSION}"
+          mkdir -p "${BOTTLE_DIR}/bin" "${BOTTLE_DIR}/share/man/man1"
+          cp programs/zstd "${BOTTLE_DIR}/bin/zstd-vk"
+          cp programs/zstd.1 "${BOTTLE_DIR}/share/man/man1/zstd-vk.1"
+
+          BOTTLE_NAME="zstd-vk--${VERSION}.${OS_TAG}.bottle.tar.gz"
+          tar czf "$BOTTLE_NAME" -C "$(dirname "$BOTTLE_DIR")" "$(basename "$BOTTLE_DIR")"
+
+          shasum -a 256 "$BOTTLE_NAME" | cut -d' ' -f1 > "${BOTTLE_NAME}.sha256"
+
+          echo "BOTTLE_NAME=${BOTTLE_NAME}" >> "$GITHUB_ENV"
+          echo "BOTTLE_SHA256=$(cat "${BOTTLE_NAME}.sha256")" >> "$GITHUB_ENV"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "OS_TAG=${OS_TAG}" >> "$GITHUB_ENV"
+
+      - name: Upload bottle to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.bottle.tar.gz
+            *.bottle.tar.gz.sha256
+
+      - name: Print formula bottle block
+        run: |
+          echo "Add this to the formula in vibekernels/homebrew-tap:"
+          echo ""
+          echo "  bottle do"
+          echo "    root_url \"https://github.com/vibekernels/zstd-vk-macos-arm64/releases/download/v${VERSION}\""
+          echo "    sha256 cellar: :any_skip_relocation, ${OS_TAG}: \"${BOTTLE_SHA256}\""
+          echo "  end"
