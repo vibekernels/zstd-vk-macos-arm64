@@ -611,29 +611,11 @@ static void ZSTD_buildFSETable_body_default(ZSTD_seqSymbol* dt,
             baseValue, nbAdditionalBits, tableLog, wksp, wkspSize);
 }
 
-#if DYNAMIC_BMI2
-BMI2_TARGET_ATTRIBUTE static void ZSTD_buildFSETable_body_bmi2(ZSTD_seqSymbol* dt,
-            const short* normalizedCounter, unsigned maxSymbolValue,
-            const U32* baseValue, const U8* nbAdditionalBits,
-            unsigned tableLog, void* wksp, size_t wkspSize)
-{
-    ZSTD_buildFSETable_body(dt, normalizedCounter, maxSymbolValue,
-            baseValue, nbAdditionalBits, tableLog, wksp, wkspSize);
-}
-#endif
-
 void ZSTD_buildFSETable(ZSTD_seqSymbol* dt,
             const short* normalizedCounter, unsigned maxSymbolValue,
             const U32* baseValue, const U8* nbAdditionalBits,
             unsigned tableLog, void* wksp, size_t wkspSize, int bmi2)
 {
-#if DYNAMIC_BMI2
-    if (bmi2) {
-        ZSTD_buildFSETable_body_bmi2(dt, normalizedCounter, maxSymbolValue,
-                baseValue, nbAdditionalBits, tableLog, wksp, wkspSize);
-        return;
-    }
-#endif
     (void)bmi2;
     ZSTD_buildFSETable_body_default(dt, normalizedCounter, maxSymbolValue,
             baseValue, nbAdditionalBits, tableLog, wksp, wkspSize);
@@ -2001,42 +1983,6 @@ ZSTD_decompressSequencesLong_default(ZSTD_DCtx* dctx,
 
 
 
-#if DYNAMIC_BMI2
-
-#ifndef ZSTD_FORCE_DECOMPRESS_SEQUENCES_LONG
-static BMI2_TARGET_ATTRIBUTE size_t
-DONT_VECTORIZE
-ZSTD_decompressSequences_bmi2(ZSTD_DCtx* dctx,
-                                 void* dst, size_t maxDstSize,
-                           const void* seqStart, size_t seqSize, int nbSeq,
-                           const ZSTD_longOffset_e isLongOffset)
-{
-    return ZSTD_decompressSequences_body(dctx, dst, maxDstSize, seqStart, seqSize, nbSeq, isLongOffset);
-}
-static BMI2_TARGET_ATTRIBUTE size_t
-DONT_VECTORIZE
-ZSTD_decompressSequencesSplitLitBuffer_bmi2(ZSTD_DCtx* dctx,
-                                 void* dst, size_t maxDstSize,
-                           const void* seqStart, size_t seqSize, int nbSeq,
-                           const ZSTD_longOffset_e isLongOffset)
-{
-    return ZSTD_decompressSequences_bodySplitLitBuffer(dctx, dst, maxDstSize, seqStart, seqSize, nbSeq, isLongOffset);
-}
-#endif /* ZSTD_FORCE_DECOMPRESS_SEQUENCES_LONG */
-
-#ifndef ZSTD_FORCE_DECOMPRESS_SEQUENCES_SHORT
-static BMI2_TARGET_ATTRIBUTE size_t
-ZSTD_decompressSequencesLong_bmi2(ZSTD_DCtx* dctx,
-                                 void* dst, size_t maxDstSize,
-                           const void* seqStart, size_t seqSize, int nbSeq,
-                           const ZSTD_longOffset_e isLongOffset)
-{
-    return ZSTD_decompressSequencesLong_body(dctx, dst, maxDstSize, seqStart, seqSize, nbSeq, isLongOffset);
-}
-#endif /* ZSTD_FORCE_DECOMPRESS_SEQUENCES_SHORT */
-
-#endif /* DYNAMIC_BMI2 */
-
 #ifndef ZSTD_FORCE_DECOMPRESS_SEQUENCES_LONG
 static size_t
 ZSTD_decompressSequences(ZSTD_DCtx* dctx, void* dst, size_t maxDstSize,
@@ -2044,11 +1990,6 @@ ZSTD_decompressSequences(ZSTD_DCtx* dctx, void* dst, size_t maxDstSize,
                    const ZSTD_longOffset_e isLongOffset)
 {
     DEBUGLOG(5, "ZSTD_decompressSequences");
-#if DYNAMIC_BMI2
-    if (ZSTD_DCtx_get_bmi2(dctx)) {
-        return ZSTD_decompressSequences_bmi2(dctx, dst, maxDstSize, seqStart, seqSize, nbSeq, isLongOffset);
-    }
-#endif
     return ZSTD_decompressSequences_default(dctx, dst, maxDstSize, seqStart, seqSize, nbSeq, isLongOffset);
 }
 static size_t
@@ -2057,11 +1998,6 @@ ZSTD_decompressSequencesSplitLitBuffer(ZSTD_DCtx* dctx, void* dst, size_t maxDst
                                  const ZSTD_longOffset_e isLongOffset)
 {
     DEBUGLOG(5, "ZSTD_decompressSequencesSplitLitBuffer");
-#if DYNAMIC_BMI2
-    if (ZSTD_DCtx_get_bmi2(dctx)) {
-        return ZSTD_decompressSequencesSplitLitBuffer_bmi2(dctx, dst, maxDstSize, seqStart, seqSize, nbSeq, isLongOffset);
-    }
-#endif
     return ZSTD_decompressSequencesSplitLitBuffer_default(dctx, dst, maxDstSize, seqStart, seqSize, nbSeq, isLongOffset);
 }
 #endif /* ZSTD_FORCE_DECOMPRESS_SEQUENCES_LONG */
@@ -2080,12 +2016,7 @@ ZSTD_decompressSequencesLong(ZSTD_DCtx* dctx,
                              const ZSTD_longOffset_e isLongOffset)
 {
     DEBUGLOG(5, "ZSTD_decompressSequencesLong");
-#if DYNAMIC_BMI2
-    if (ZSTD_DCtx_get_bmi2(dctx)) {
-        return ZSTD_decompressSequencesLong_bmi2(dctx, dst, maxDstSize, seqStart, seqSize, nbSeq, isLongOffset);
-    }
-#endif
-  return ZSTD_decompressSequencesLong_default(dctx, dst, maxDstSize, seqStart, seqSize, nbSeq, isLongOffset);
+    return ZSTD_decompressSequencesLong_default(dctx, dst, maxDstSize, seqStart, seqSize, nbSeq, isLongOffset);
 }
 #endif /* ZSTD_FORCE_DECOMPRESS_SEQUENCES_SHORT */
 

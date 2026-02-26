@@ -21,28 +21,14 @@ FUZZDIR  = $(TESTDIR)/fuzz
 # Define nul output
 VOID = /dev/null
 
-# When cross-compiling from linux to windows, you might
-# need to specify this as "Windows." Fedora build fails
-# without it.
-#
-# Note: mingw-w64 build from linux to windows does not
-# fail on other tested distros (ubuntu, debian) even
-# without manually specifying the TARGET_SYSTEM.
-TARGET_SYSTEM ?= $(OS)
-CP ?= cp
-
-ifneq (,$(filter Windows%,$(TARGET_SYSTEM)))
-  EXT =.exe
-else
-  EXT =
-endif
+EXT =
 
 ## default: Build lib-release and zstd-release
 .PHONY: default
 default: lib-release zstd-release
 
 .PHONY: all
-all: allmost examples manual contrib
+all: allmost examples
 
 .PHONY: allmost
 allmost: allzstd zlibwrapper
@@ -52,11 +38,6 @@ allmost: allzstd zlibwrapper
 allzstd: lib
 	$(Q)$(MAKE) -C $(PRGDIR) all
 	$(Q)$(MAKE) -C $(TESTDIR) all
-
-.PHONY: all32
-all32:
-	$(MAKE) -C $(PRGDIR) zstd32
-	$(MAKE) -C $(TESTDIR) all32
 
 .PHONY: lib lib-release lib-mt lib-nomt
 lib lib-release lib-mt lib-nomt:
@@ -70,7 +51,7 @@ zstd zstd-release:
 .PHONY: zstdmt
 zstdmt:
 	$(Q)$(MAKE) -C $(PRGDIR) $@
-	$(Q)$(CP) $(PRGDIR)/zstd$(EXT) ./zstdmt$(EXT)
+	$(Q)cp $(PRGDIR)/zstd$(EXT) ./zstdmt$(EXT)
 
 .PHONY: zlibwrapper
 zlibwrapper: lib
@@ -102,30 +83,10 @@ benchmarking: automated_benchmarking
 examples: lib
 	$(MAKE) -C examples all
 
-## manual: generate API documentation in html format
-.PHONY: manual
-manual:
-	$(MAKE) -C contrib/gen_html $@
-
 ## man: generate man page
 .PHONY: man
 man:
 	$(MAKE) -C programs $@
-
-## contrib: build all supported projects in `/contrib` directory
-.PHONY: contrib
-contrib: lib
-	$(MAKE) -C contrib/pzstd all
-	$(MAKE) -C contrib/seekable_format/examples all
-	$(MAKE) -C contrib/seekable_format/tests test
-	$(MAKE) -C contrib/largeNbDicts all
-	$(MAKE) -C contrib/externalSequenceProducer all
-	cd build/single_file_libs/ ; ./build_decoder_test.sh
-	cd build/single_file_libs/ ; ./build_library_test.sh
-
-.PHONY: cleanTabs
-cleanTabs:
-	cd contrib; ./cleanTabs
 
 .PHONY: clean
 clean:
@@ -134,14 +95,7 @@ clean:
 	$(Q)$(MAKE) -C $(TESTDIR) $@ > $(VOID)
 	$(Q)$(MAKE) -C $(ZWRAPDIR) $@ > $(VOID)
 	$(Q)$(MAKE) -C examples/ $@ > $(VOID)
-	$(Q)$(MAKE) -C contrib/gen_html $@ > $(VOID)
-	$(Q)$(MAKE) -C contrib/pzstd $@ > $(VOID)
-	$(Q)$(MAKE) -C contrib/seekable_format/examples $@ > $(VOID)
-	$(Q)$(MAKE) -C contrib/seekable_format/tests $@ > $(VOID)
-	$(Q)$(MAKE) -C contrib/largeNbDicts $@ > $(VOID)
-	$(Q)$(MAKE) -C contrib/externalSequenceProducer $@ > $(VOID)
 	$(Q)$(RM) zstd$(EXT) zstdmt$(EXT) tmp*
-	$(Q)$(RM) -r lz4 cmakebuild mesonbuild install
 	@echo Cleaning completed
 
 LIBZSTD_MK_DIR = $(ZSTDDIR)
@@ -182,7 +136,7 @@ list:
 	    done \
 	} | column -t -s $$'\t'
 
-.PHONY: install armtest usan asan uasan msan asan32
+.PHONY: install
 install:
 	$(Q)$(MAKE) -C $(ZSTDDIR) $@
 	$(Q)$(MAKE) -C $(PRGDIR) $@
@@ -196,97 +150,15 @@ uninstall:
 travis-install:
 	$(MAKE) install PREFIX=~/install_test_dir
 
-.PHONY: clangbuild-darwin-fat
-clangbuild-darwin-fat: clean
-	clang -v
-	CXX=clang++ CC=clang CFLAGS+="-Werror -Wconversion -Wno-sign-conversion -Wdocumentation -arch arm64" $(MAKE) zstd-release
-	mv programs/zstd programs/zstd_arm64
-	CXX=clang++ CC=clang CFLAGS+="-Werror -Wconversion -Wno-sign-conversion -Wdocumentation -arch x86_64" $(MAKE) zstd-release
-	mv programs/zstd programs/zstd_x64
-	lipo -create programs/zstd_x64 programs/zstd_arm64 -output programs/zstd
-
-.PHONY: gcc5build gcc6build gcc7build clangbuild m32build armbuild aarch64build ppcbuild ppc64build
-gcc5build: clean
-	gcc-5 -v
-	CC=gcc-5 $(MAKE) all MOREFLAGS="-Werror $(MOREFLAGS)"
-
-gcc6build: clean
-	gcc-6 -v
-	CC=gcc-6 $(MAKE) all MOREFLAGS="-Werror $(MOREFLAGS)"
-
-gcc7build: clean
-	gcc-7 -v
-	CC=gcc-7 $(MAKE) all MOREFLAGS="-Werror $(MOREFLAGS)"
-
+.PHONY: clangbuild
 clangbuild: clean
 	clang -v
 	CXX=clang++ CC=clang CFLAGS="-Werror -Wconversion -Wno-sign-conversion -Wdocumentation" $(MAKE) all
 
-m32build: clean
-	gcc -v
-	$(MAKE) all32
-
-armbuild: clean
-	CC=arm-linux-gnueabi-gcc CFLAGS="-Werror" $(MAKE) allzstd
-
-aarch64build: clean
-	CC=aarch64-linux-gnu-gcc CFLAGS="-Werror -O0" $(MAKE) allzstd
-
-ppcbuild: clean
-	CC=powerpc-linux-gnu-gcc CFLAGS="-m32 -Wno-attributes -Werror" $(MAKE) -j allzstd
-
-ppc64build: clean
-	CC=powerpc-linux-gnu-gcc CFLAGS="-m64 -Werror" $(MAKE) -j allzstd
-
-.PHONY: armfuzz aarch64fuzz ppcfuzz ppc64fuzz
-armfuzz: clean
-	CC=arm-linux-gnueabi-gcc QEMU_SYS=qemu-arm-static MOREFLAGS="-static $(MOREFLAGS)" FUZZER_FLAGS="--no-big-tests $(FUZZER_FLAGS)" $(MAKE) -C $(TESTDIR) fuzztest
-
-aarch64fuzz: clean
-	ld -v
-	CC=aarch64-linux-gnu-gcc QEMU_SYS=qemu-aarch64-static MOREFLAGS="-static $(MOREFLAGS)" FUZZER_FLAGS="--no-big-tests $(FUZZER_FLAGS)" $(MAKE) -C $(TESTDIR) fuzztest
-
-ppcfuzz: clean
-	CC=powerpc-linux-gnu-gcc QEMU_SYS=qemu-ppc-static MOREFLAGS="-static $(MOREFLAGS)" FUZZER_FLAGS="--no-big-tests $(FUZZER_FLAGS)" $(MAKE) -C $(TESTDIR) fuzztest
-
-ppc64fuzz: clean
-	CC=powerpc-linux-gnu-gcc QEMU_SYS=qemu-ppc64-static MOREFLAGS="-m64 -static $(MOREFLAGS)" FUZZER_FLAGS="--no-big-tests $(FUZZER_FLAGS)" $(MAKE) -C $(TESTDIR) fuzztest
-
-.PHONY: cxxtest gcc5test gcc6test armtest aarch64test ppctest ppc64test
+.PHONY: cxxtest
 cxxtest: CXXFLAGS += -Wall -Wextra -Wundef -Wshadow -Wcast-align -Werror
 cxxtest: clean
 	$(MAKE) -C $(PRGDIR) all CC="$(CXX) -Wno-deprecated" CFLAGS="$(CXXFLAGS)"   # adding -Wno-deprecated to avoid clang++ warning on dealing with C files directly
-
-gcc5test: clean
-	gcc-5 -v
-	$(MAKE) all CC=gcc-5 MOREFLAGS="-Werror $(MOREFLAGS)"
-
-gcc6test: clean
-	gcc-6 -v
-	$(MAKE) all CC=gcc-6 MOREFLAGS="-Werror $(MOREFLAGS)"
-
-armtest: clean
-	$(MAKE) -C $(TESTDIR) datagen   # use native, faster
-	$(MAKE) -C $(TESTDIR) test CC=arm-linux-gnueabi-gcc QEMU_SYS=qemu-arm-static ZSTDRTTEST= MOREFLAGS="-Werror -static $(MOREFLAGS)" FUZZER_FLAGS="--no-big-tests $(FUZZER_FLAGS)"
-
-aarch64test:
-	$(MAKE) -C $(TESTDIR) datagen   # use native, faster
-	$(MAKE) -C $(TESTDIR) test CC=aarch64-linux-gnu-gcc QEMU_SYS=qemu-aarch64-static ZSTDRTTEST= MOREFLAGS="-Werror -static $(MOREFLAGS)" FUZZER_FLAGS="--no-big-tests $(FUZZER_FLAGS)"
-
-ppctest: clean
-	$(MAKE) -C $(TESTDIR) datagen   # use native, faster
-	$(MAKE) -C $(TESTDIR) test CC=powerpc-linux-gnu-gcc QEMU_SYS=qemu-ppc-static ZSTDRTTEST= MOREFLAGS="-Werror -Wno-attributes -static $(MOREFLAGS)" FUZZER_FLAGS="--no-big-tests $(FUZZER_FLAGS)"
-
-ppc64test: clean
-	$(MAKE) -C $(TESTDIR) datagen   # use native, faster
-	$(MAKE) -C $(TESTDIR) test CC=powerpc-linux-gnu-gcc QEMU_SYS=qemu-ppc64-static ZSTDRTTEST= MOREFLAGS="-m64 -static $(MOREFLAGS)" FUZZER_FLAGS="--no-big-tests $(FUZZER_FLAGS)"
-
-.PHONY: arm-ppc-compilation
-arm-ppc-compilation:
-	$(MAKE) -C $(PRGDIR) clean zstd CC=arm-linux-gnueabi-gcc QEMU_SYS=qemu-arm-static ZSTDRTTEST= MOREFLAGS="-Werror -static $(MOREFLAGS)"
-	$(MAKE) -C $(PRGDIR) clean zstd CC=aarch64-linux-gnu-gcc QEMU_SYS=qemu-aarch64-static ZSTDRTTEST= MOREFLAGS="-Werror -static $(MOREFLAGS)"
-	$(MAKE) -C $(PRGDIR) clean zstd CC=powerpc-linux-gnu-gcc QEMU_SYS=qemu-ppc-static ZSTDRTTEST= MOREFLAGS="-Werror -Wno-attributes -static $(MOREFLAGS)"
-	$(MAKE) -C $(PRGDIR) clean zstd CC=powerpc-linux-gnu-gcc QEMU_SYS=qemu-ppc64-static ZSTDRTTEST= MOREFLAGS="-m64 -static $(MOREFLAGS)"
 
 regressiontest:
 	$(MAKE) -C $(FUZZDIR) regressiontest
@@ -310,7 +182,7 @@ update_regressionResults:
 	echo "Showing results differences"
 	! diff tests/regression/results.csv $(REGRESS_RESULTS_DIR)/results.csv
 	echo "Updating results.csv"
-	$(CP) $(REGRESS_RESULTS_DIR)/results.csv tests/regression/results.csv
+	cp $(REGRESS_RESULTS_DIR)/results.csv tests/regression/results.csv
 
 
 # run UBsan with -fsanitize-recover=pointer-overflow
@@ -331,9 +203,6 @@ msan-%:
 	$(MAKE) clean
 	LDFLAGS=-fuse-ld=gold MOREFLAGS="-g -fno-sanitize-recover=all -fsanitize=memory -fno-omit-frame-pointer -Werror $(MOREFLAGS)" FUZZER_FLAGS="--no-big-tests $(FUZZER_FLAGS)" $(MAKE) -j -C $(TESTDIR) HAVE_LZMA=0 $*
 
-asan32: clean
-	$(MAKE) -C $(TESTDIR) test32 CC=clang MOREFLAGS="-g -fsanitize=address $(MOREFLAGS)"
-
 uasan: clean
 	$(MAKE) test CC=clang MOREFLAGS="-g -fno-sanitize-recover=all -fsanitize=address,undefined -Werror $(MOREFLAGS)"
 
@@ -343,92 +212,7 @@ uasan-%: clean
 tsan-%: clean
 	LDFLAGS=-fuse-ld=gold MOREFLAGS="-g -fno-sanitize-recover=all -fsanitize=thread -Werror $(MOREFLAGS)" $(MAKE) -C $(TESTDIR) $* FUZZER_FLAGS="--no-big-tests $(FUZZER_FLAGS)"
 
-.PHONY: apt-install
-apt-install:
-	# TODO: uncomment once issue 3011 is resolved and remove hack from Github Actions .yml
-	# sudo apt-get update
-	sudo apt-get -yq --no-install-suggests --no-install-recommends --force-yes install $(APT_PACKAGES)
-
-.PHONY: apt-add-repo
-apt-add-repo:
-	sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-	sudo apt-get update -y -qq
-
-.PHONY: ppcinstall arminstall valgrindinstall libc6install gcc6install gcc7install gcc8install gpp6install clang38install
-ppcinstall:
-	APT_PACKAGES="qemu-system-ppc qemu-user-static gcc-powerpc-linux-gnu" $(MAKE) apt-install
-
-arminstall:
-	APT_PACKAGES="qemu-system-arm qemu-user-static gcc-arm-linux-gnueabi libc6-dev-armel-cross gcc-aarch64-linux-gnu libc6-dev-arm64-cross" $(MAKE) apt-install
-
-valgrindinstall:
-	APT_PACKAGES="valgrind" $(MAKE) apt-install
-
-libc6install:
-	APT_PACKAGES="libc6-dev-i386 gcc-multilib" $(MAKE) apt-install
-
-gcc6install: apt-add-repo
-	APT_PACKAGES="libc6-dev-i386 gcc-multilib gcc-6 gcc-6-multilib" $(MAKE) apt-install
-
-gcc7install: apt-add-repo
-	APT_PACKAGES="libc6-dev-i386 gcc-multilib gcc-7 gcc-7-multilib" $(MAKE) apt-install
-
-gcc8install: apt-add-repo
-	APT_PACKAGES="libc6-dev-i386 gcc-multilib gcc-8 gcc-8-multilib" $(MAKE) apt-install
-
-gpp6install: apt-add-repo
-	APT_PACKAGES="libc6-dev-i386 g++-multilib gcc-6 g++-6 g++-6-multilib" $(MAKE) apt-install
-
-clang38install:
-	APT_PACKAGES="clang-3.8" $(MAKE) apt-install
-
-endif
-
-
-ifneq (,$(filter MSYS%,$(shell sh -c 'MSYSTEM="MSYS" uname') ))
-HOST_OS = MSYS
-endif
-
-#------------------------------------------------------------------------
-# target specific tests
-#------------------------------------------------------------------------
-ifneq (,$(filter MSYS POSIX,$(HOST_OS)))
-
-CMAKE ?= cmake
-CMAKE_PARAMS = -DZSTD_BUILD_CONTRIB:BOOL=ON -DZSTD_BUILD_STATIC:BOOL=ON -DZSTD_BUILD_TESTS:BOOL=ON -DZSTD_ZLIB_SUPPORT:BOOL=ON -DZSTD_LZMA_SUPPORT:BOOL=ON
-
-ifneq (,$(filter MSYS%,$(shell sh -c 'MSYSTEM="MSYS" uname')))
-CMAKE_PARAMS = -G"MSYS Makefiles" -DZSTD_MULTITHREAD_SUPPORT:BOOL=OFF -DZSTD_BUILD_STATIC:BOOL=ON -DZSTD_BUILD_TESTS:BOOL=ON
-endif
-
-.PHONY: cmakebuild
-cmakebuild:
-	$(CMAKE) --version
-	$(RM) -r cmakebuild install
-	$(MKDIR) cmakebuild install
-	cd cmakebuild; $(CMAKE) -Wdev -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-Werror -O0" -DCMAKE_INSTALL_PREFIX=install $(CMAKE_PARAMS) ../build/cmake
-	$(CMAKE) --build cmakebuild --target install -- -j V=1
-	cd cmakebuild; ctest -V -L Medium
-
-MESON ?= meson
-NINJA ?= ninja
-
-.PHONY: mesonbuild
-mesonbuild:
-	$(MESON) setup \
-		--buildtype=debugoptimized \
-		-Db_lundef=false \
-		-Dauto_features=enabled \
-		-Dbin_programs=true \
-		-Dbin_tests=true \
-		-Dbin_contrib=true \
-		-Ddefault_library=both \
-		build/meson mesonbuild
-	$(NINJA) -C mesonbuild/
-	$(MESON) test -C mesonbuild/ --print-errorlogs
-	$(MESON) install -C mesonbuild --destdir staging/
-
-.PHONY: c89build gnu90build c99build gnu99build c11build bmix64build bmix32build bmi32build staticAnalyze
+.PHONY: c89build gnu90build c99build gnu99build c11build staticAnalyze
 c89build: clean
 	$(CC) -v
 	CFLAGS="-std=c89 -Werror -Wno-attributes -Wpedantic -Wno-long-long -Wno-variadic-macros -O0" $(MAKE) lib zstd
@@ -448,18 +232,6 @@ gnu99build: clean
 c11build: clean
 	$(CC) -v
 	CFLAGS="-std=c11 -Werror -O0" $(MAKE) allmost
-
-bmix64build: clean
-	$(CC) -v
-	CFLAGS="-O3 -mbmi -Werror" $(MAKE) -C $(TESTDIR) test
-
-bmix32build: clean
-	$(CC) -v
-	CFLAGS="-O3 -mbmi -mx32 -Werror" $(MAKE) -C $(TESTDIR) test
-
-bmi32build: clean
-	$(CC) -v
-	CFLAGS="-O3 -mbmi -m32 -Werror" $(MAKE) -C $(TESTDIR) test
 
 # static analyzer test uses clang's scan-build
 # does not analyze zlibWrapper, due to detected issues in zlib source code

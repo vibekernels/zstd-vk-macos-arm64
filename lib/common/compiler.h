@@ -29,8 +29,6 @@
 
 #if defined(__GNUC__) || defined(__IAR_SYSTEMS_ICC__)
 #  define FORCE_INLINE_ATTR __attribute__((always_inline))
-#elif defined(_MSC_VER)
-#  define FORCE_INLINE_ATTR __forceinline
 #else
 #  define FORCE_INLINE_ATTR
 #endif
@@ -42,16 +40,7 @@
 
 #endif
 
-/**
-  On MSVC qsort requires that functions passed into it use the __cdecl calling conversion(CC).
-  This explicitly marks such functions as __cdecl so that the code will still compile
-  if a CC other than __cdecl has been made the default.
-*/
-#if  defined(_MSC_VER)
-#  define WIN_CDECL __cdecl
-#else
-#  define WIN_CDECL
-#endif
+#define WIN_CDECL
 
 /* UNUSED_ATTR tells the compiler it is okay if the function is unused. */
 #if defined(__GNUC__) || defined(__IAR_SYSTEMS_ICC__)
@@ -99,22 +88,16 @@
 #  define MEM_STATIC static inline UNUSED_ATTR
 #elif defined (__cplusplus) || (defined (__STDC_VERSION__) && (__STDC_VERSION__ >= 199901L) /* C99 */)
 #  define MEM_STATIC static inline
-#elif defined(_MSC_VER)
-#  define MEM_STATIC static __inline
 #else
 #  define MEM_STATIC static  /* this version may generate warnings for unused static functions; disable the relevant warning */
 #endif
 #endif
 
 /* force no inlining */
-#ifdef _MSC_VER
-#  define FORCE_NOINLINE static __declspec(noinline)
+#if defined(__GNUC__) || defined(__IAR_SYSTEMS_ICC__)
+#  define FORCE_NOINLINE static __attribute__((__noinline__))
 #else
-#  if defined(__GNUC__) || defined(__IAR_SYSTEMS_ICC__)
-#    define FORCE_NOINLINE static __attribute__((__noinline__))
-#  else
-#    define FORCE_NOINLINE static
-#  endif
+#  define FORCE_NOINLINE static
 #endif
 
 
@@ -125,32 +108,23 @@
 #  define TARGET_ATTRIBUTE(target)
 #endif
 
-/* Target attribute for BMI2 dynamic dispatch.
- * Enable lzcnt, bmi, and bmi2.
- * We test for bmi1 & bmi2. lzcnt is included in bmi1.
- */
-#define BMI2_TARGET_ATTRIBUTE TARGET_ATTRIBUTE("lzcnt,bmi,bmi2")
+/* BMI2 not available on ARM64 */
+#define BMI2_TARGET_ATTRIBUTE
 
 /* prefetch
  * can be disabled, by declaring NO_PREFETCH build macro */
 #if defined(NO_PREFETCH)
 #  define PREFETCH_L1(ptr)  do { (void)(ptr); } while (0)  /* disabled */
 #  define PREFETCH_L2(ptr)  do { (void)(ptr); } while (0)  /* disabled */
+#elif defined(__GNUC__) && ( (__GNUC__ >= 4) || ( (__GNUC__ == 3) && (__GNUC_MINOR__ >= 1) ) )
+#  define PREFETCH_L1(ptr)  __builtin_prefetch((ptr), 0 /* rw==read */, 3 /* locality */)
+#  define PREFETCH_L2(ptr)  __builtin_prefetch((ptr), 0 /* rw==read */, 2 /* locality */)
+#elif defined(__aarch64__)
+#  define PREFETCH_L1(ptr)  do { __asm__ __volatile__("prfm pldl1keep, %0" ::"Q"(*(ptr))); } while (0)
+#  define PREFETCH_L2(ptr)  do { __asm__ __volatile__("prfm pldl2keep, %0" ::"Q"(*(ptr))); } while (0)
 #else
-#  if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_I86)) && !defined(_M_ARM64EC)  /* _mm_prefetch() is not defined outside of x86/x64 */
-#    include <mmintrin.h>   /* https://msdn.microsoft.com/fr-fr/library/84szxsww(v=vs.90).aspx */
-#    define PREFETCH_L1(ptr)  _mm_prefetch((const char*)(ptr), _MM_HINT_T0)
-#    define PREFETCH_L2(ptr)  _mm_prefetch((const char*)(ptr), _MM_HINT_T1)
-#  elif defined(__GNUC__) && ( (__GNUC__ >= 4) || ( (__GNUC__ == 3) && (__GNUC_MINOR__ >= 1) ) )
-#    define PREFETCH_L1(ptr)  __builtin_prefetch((ptr), 0 /* rw==read */, 3 /* locality */)
-#    define PREFETCH_L2(ptr)  __builtin_prefetch((ptr), 0 /* rw==read */, 2 /* locality */)
-#  elif defined(__aarch64__)
-#    define PREFETCH_L1(ptr)  do { __asm__ __volatile__("prfm pldl1keep, %0" ::"Q"(*(ptr))); } while (0)
-#    define PREFETCH_L2(ptr)  do { __asm__ __volatile__("prfm pldl2keep, %0" ::"Q"(*(ptr))); } while (0)
-#  else
-#    define PREFETCH_L1(ptr) do { (void)(ptr); } while (0)  /* disabled */
-#    define PREFETCH_L2(ptr) do { (void)(ptr); } while (0)  /* disabled */
-#  endif
+#  define PREFETCH_L1(ptr) do { (void)(ptr); } while (0)  /* disabled */
+#  define PREFETCH_L2(ptr) do { (void)(ptr); } while (0)  /* disabled */
 #endif  /* NO_PREFETCH */
 
 #define CACHELINE_SIZE 64
@@ -197,24 +171,8 @@
 #  define ZSTD_UNREACHABLE do { assert(0); } while (0)
 #endif
 
-/* disable warnings */
-#ifdef _MSC_VER    /* Visual Studio */
-#  include <intrin.h>                    /* For Visual 2005 */
-#  pragma warning(disable : 4100)        /* disable: C4100: unreferenced formal parameter */
-#  pragma warning(disable : 4127)        /* disable: C4127: conditional expression is constant */
-#  pragma warning(disable : 4204)        /* disable: C4204: non-constant aggregate initializer */
-#  pragma warning(disable : 4214)        /* disable: C4214: non-int bitfields */
-#  pragma warning(disable : 4324)        /* disable: C4324: padded structure */
-#endif
-
 /* compile time determination of SIMD support */
 #if !defined(ZSTD_NO_INTRINSICS)
-#  if defined(__AVX2__)
-#    define ZSTD_ARCH_X86_AVX2
-#  endif
-#  if defined(__SSE2__) || defined(_M_X64) || (defined (_M_IX86) && defined(_M_IX86_FP) && (_M_IX86_FP >= 2))
-#    define ZSTD_ARCH_X86_SSE2
-#  endif
 #  if defined(__ARM_NEON) || defined(_M_ARM64)
 #    define ZSTD_ARCH_ARM_NEON
 #  endif
@@ -224,26 +182,11 @@
 #  if defined(__ARM_FEATURE_SVE2)
 #    define ZSTD_ARCH_ARM_SVE2
 #  endif
-#  if defined(__riscv) && defined(__riscv_vector)
-#    if ((defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 14) || \
-        (defined(__clang__) && __clang_major__ >= 19))
-        #define ZSTD_ARCH_RISCV_RVV
-#  endif
-#endif
-#
-#  if defined(ZSTD_ARCH_X86_AVX2)
-#    include <immintrin.h>
-#  endif
-#  if defined(ZSTD_ARCH_X86_SSE2)
-#    include <emmintrin.h>
-#  elif defined(ZSTD_ARCH_ARM_NEON)
+#  if defined(ZSTD_ARCH_ARM_NEON)
 #    include <arm_neon.h>
 #  endif
 #  if defined(ZSTD_ARCH_ARM_SVE) || defined(ZSTD_ARCH_ARM_SVE2)
 #    include <arm_sve.h>
-#  endif
-#  if defined(ZSTD_ARCH_RISCV_RVV)
-#    include <riscv_vector.h>
 #  endif
 #endif
 
@@ -324,8 +267,6 @@ MEM_STATIC int ZSTD_isPower2(size_t u) {
 #  define ZSTD_ALIGNED(a) __attribute__((aligned(a)))
 # elif defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L) /* C11 */
 #  define ZSTD_ALIGNED(a) _Alignas(a)
-#elif defined(_MSC_VER)
-#  define ZSTD_ALIGNED(n) __declspec(align(n))
 # else
    /* this compiler will require its own alignment instruction */
 #  define ZSTD_ALIGNED(...)
@@ -404,17 +345,6 @@ void* ZSTD_maybeNullPtrAdd(void* ptr, ptrdiff_t add)
 {
     return add > 0 ? (char*)ptr + add : ptr;
 }
-
-/* Issue #3240 reports an ASAN failure on an llvm-mingw build. Out of an
- * abundance of caution, disable our custom poisoning on mingw. */
-#ifdef __MINGW32__
-#ifndef ZSTD_ASAN_DONT_POISON_WORKSPACE
-#define ZSTD_ASAN_DONT_POISON_WORKSPACE 1
-#endif
-#ifndef ZSTD_MSAN_DONT_POISON_WORKSPACE
-#define ZSTD_MSAN_DONT_POISON_WORKSPACE 1
-#endif
-#endif
 
 #if ZSTD_MEMORY_SANITIZER && !defined(ZSTD_MSAN_DONT_POISON_WORKSPACE)
 /* Not all platforms that support msan provide sanitizers/msan_interface.h.

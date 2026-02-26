@@ -23,10 +23,7 @@
 /*-****************************************
 *  Compiler specifics
 ******************************************/
-#if defined(_MSC_VER)   /* Visual Studio */
-#   include <stdlib.h>  /* _byteswap_ulong */
-#   include <intrin.h>  /* _byteswap_* */
-#elif defined(__ICCARM__)
+#if defined(__ICCARM__)
 #   include <intrinsics.h>
 #endif
 
@@ -147,10 +144,6 @@ MEM_STATIC unsigned MEM_isLittleEndian(void)
     return 1;
 #elif defined(__clang__) && __BIG_ENDIAN__
     return 0;
-#elif defined(_MSC_VER) && (_M_X64 || _M_IX86)
-    return 1;
-#elif defined(__DMC__) && defined(_M_IX86)
-    return 1;
 #elif defined(__IAR_SYSTEMS_ICC__) && __LITTLE_ENDIAN__
     return 1;
 #else
@@ -240,9 +233,7 @@ MEM_STATIC U32 MEM_swap32_fallback(U32 in)
 
 MEM_STATIC U32 MEM_swap32(U32 in)
 {
-#if defined(_MSC_VER)     /* Visual Studio */
-    return _byteswap_ulong(in);
-#elif (defined (__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__ >= 403)) \
+#if (defined (__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__ >= 403)) \
   || (defined(__clang__) && __has_builtin(__builtin_bswap32))
     return __builtin_bswap32(in);
 #elif defined(__ICCARM__)
@@ -266,9 +257,7 @@ MEM_STATIC U64 MEM_swap64_fallback(U64 in)
 
 MEM_STATIC U64 MEM_swap64(U64 in)
 {
-#if defined(_MSC_VER)     /* Visual Studio */
-    return _byteswap_uint64(in);
-#elif (defined (__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__ >= 403)) \
+#if (defined (__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__ >= 403)) \
   || (defined(__clang__) && __has_builtin(__builtin_bswap64))
     return __builtin_bswap64(in);
 #else

@@ -1118,37 +1118,6 @@ HUF_compress1X_usingCTable_internal_body(void* dst, size_t dstSize,
     return HUF_closeCStream(&bitC);
 }
 
-#if DYNAMIC_BMI2
-
-static BMI2_TARGET_ATTRIBUTE size_t
-HUF_compress1X_usingCTable_internal_bmi2(void* dst, size_t dstSize,
-                                   const void* src, size_t srcSize,
-                                   const HUF_CElt* CTable)
-{
-    return HUF_compress1X_usingCTable_internal_body(dst, dstSize, src, srcSize, CTable);
-}
-
-static size_t
-HUF_compress1X_usingCTable_internal_default(void* dst, size_t dstSize,
-                                      const void* src, size_t srcSize,
-                                      const HUF_CElt* CTable)
-{
-    return HUF_compress1X_usingCTable_internal_body(dst, dstSize, src, srcSize, CTable);
-}
-
-static size_t
-HUF_compress1X_usingCTable_internal(void* dst, size_t dstSize,
-                              const void* src, size_t srcSize,
-                              const HUF_CElt* CTable, const int flags)
-{
-    if (flags & HUF_flags_bmi2) {
-        return HUF_compress1X_usingCTable_internal_bmi2(dst, dstSize, src, srcSize, CTable);
-    }
-    return HUF_compress1X_usingCTable_internal_default(dst, dstSize, src, srcSize, CTable);
-}
-
-#else
-
 static size_t
 HUF_compress1X_usingCTable_internal(void* dst, size_t dstSize,
                               const void* src, size_t srcSize,
@@ -1157,8 +1126,6 @@ HUF_compress1X_usingCTable_internal(void* dst, size_t dstSize,
     (void)flags;
     return HUF_compress1X_usingCTable_internal_body(dst, dstSize, src, srcSize, CTable);
 }
-
-#endif
 
 size_t HUF_compress1X_usingCTable(void* dst, size_t dstSize, const void* src, size_t srcSize, const HUF_CElt* CTable, int flags)
 {

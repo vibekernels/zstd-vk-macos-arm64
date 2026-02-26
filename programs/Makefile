@@ -137,7 +137,7 @@ allVariants: all zstd-frugal zstd-nolegacy zstd-dictBuilder
 zstd : CPPFLAGS += $(THREAD_CPP) $(ZLIBCPP) $(LZMACPP) $(LZ4CPP)
 zstd : LDFLAGS += $(THREAD_LD) $(DEBUGFLAGS_LD)
 zstd : LDLIBS += $(ZLIBLD) $(LZMALD) $(LZ4LD)
-zstd : CPPFLAGS += -DZSTD_LEGACY_SUPPORT=$(ZSTD_LEGACY_SUPPORT)
+zstd : CPPFLAGS += -DZSTD_LEGACY_SUPPORT=0
 ifneq (,$(filter Windows%,$(OS)))
 zstd : $(RES_FILE)
 endif
@@ -188,7 +188,7 @@ zstd-release: zstd
 CLEAN += zstd32
 zstd32 : CPPFLAGS += $(THREAD_CPP)
 zstd32 : LDFLAGS  += $(THREAD_LD)
-zstd32 : CPPFLAGS += -DZSTD_LEGACY_SUPPORT=$(ZSTD_LEGACY_SUPPORT)
+zstd32 : CPPFLAGS += -DZSTD_LEGACY_SUPPORT=0
 ifneq (,$(filter Windows%,$(OS)))
 zstd32 : $(RES32_FILE)
 endif

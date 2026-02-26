@@ -28,10 +28,6 @@ LIB_BINDIR ?= $(LIB_SRCDIR)
 # configures a bunch of other variables to space-optimized defaults.
 ZSTD_LIB_MINIFY ?= 0
 
-# Legacy support disabled by default
-ZSTD_LEGACY_SUPPORT ?= 0
-ZSTD_LEGACY_MULTITHREADED_API ?= 0
-
 # Build size optimizations
 ifneq ($(ZSTD_LIB_MINIFY), 0)
   HUF_FORCE_DECOMPRESS_X1 ?= 1
@@ -147,16 +143,9 @@ ZSTD_COMPRESS_FILES := $(sort $(wildcard $(LIB_SRCDIR)/compress/*.c))
 ZSTD_DECOMPRESS_FILES := $(sort $(wildcard $(LIB_SRCDIR)/decompress/*.c))
 ZSTD_DICTBUILDER_FILES := $(sort $(wildcard $(LIB_SRCDIR)/dictBuilder/*.c))
 ZSTD_DEPRECATED_FILES := $(sort $(wildcard $(LIB_SRCDIR)/deprecated/*.c))
-ZSTD_LEGACY_FILES :=
-
-ZSTD_DECOMPRESS_AMD64_ASM_FILES := $(sort $(wildcard $(LIB_SRCDIR)/decompress/*_amd64.S))
 
 ifneq ($(ZSTD_NO_ASM), 0)
   CPPFLAGS += -DZSTD_DISABLE_ASM
-else
-  # Unconditionally add the ASM files they are disabled by
-  # macros in the .S file.
-  ZSTD_DECOMPRESS_FILES += $(ZSTD_DECOMPRESS_AMD64_ASM_FILES)
 endif
 
 ifneq ($(HUF_FORCE_DECOMPRESS_X1), 0)
@@ -183,10 +172,6 @@ ifneq ($(ZSTD_STRIP_ERROR_STRINGS), 0)
   CFLAGS += -DZSTD_STRIP_ERROR_STRINGS
 endif
 
-ifneq ($(ZSTD_LEGACY_MULTITHREADED_API), 0)
-  CFLAGS += -DZSTD_LEGACY_MULTITHREADED_API
-endif
-
 ifneq ($(ZSTD_LIB_EXCLUDE_COMPRESSORS_DFAST_AND_UP), 0)
   CFLAGS += -DZSTD_EXCLUDE_DFAST_BLOCK_COMPRESSOR -DZSTD_EXCLUDE_GREEDY_BLOCK_COMPRESSOR -DZSTD_EXCLUDE_LAZY2_BLOCK_COMPRESSOR -DZSTD_EXCLUDE_BTLAZY2_BLOCK_COMPRESSOR -DZSTD_EXCLUDE_BTOPT_BLOCK_COMPRESSOR -DZSTD_EXCLUDE_BTULTRA_BLOCK_COMPRESSOR
 else
@@ -195,12 +180,7 @@ ifneq ($(ZSTD_LIB_EXCLUDE_COMPRESSORS_GREEDY_AND_UP), 0)
 endif
 endif
 
-ifneq ($(ZSTD_LEGACY_SUPPORT), 0)
-ifeq ($(shell test $(ZSTD_LEGACY_SUPPORT) -lt 8; echo $$?), 0)
-  ZSTD_LEGACY_FILES += $(shell ls $(LIB_SRCDIR)/legacy/*.c | $(GREP) 'v0[$(ZSTD_LEGACY_SUPPORT)-7]')
-endif
-endif
-CPPFLAGS  += -DZSTD_LEGACY_SUPPORT=$(ZSTD_LEGACY_SUPPORT)
+CPPFLAGS  += -DZSTD_LEGACY_SUPPORT=0
 
 # Include install_oses.mk from the same directory
 include $(dir $(lastword $(MAKEFILE_LIST)))/install_oses.mk
@@ -227,7 +207,7 @@ ifeq ($(HAVE_HASH),0)
 endif
 endif # BUILD_DIR
 
-ZSTD_SUBDIR := $(LIB_SRCDIR)/common $(LIB_SRCDIR)/compress $(LIB_SRCDIR)/decompress $(LIB_SRCDIR)/dictBuilder $(LIB_SRCDIR)/legacy $(LIB_SRCDIR)/deprecated
+ZSTD_SUBDIR := $(LIB_SRCDIR)/common $(LIB_SRCDIR)/compress $(LIB_SRCDIR)/decompress $(LIB_SRCDIR)/dictBuilder $(LIB_SRCDIR)/deprecated
 vpath %.c $(ZSTD_SUBDIR)
 vpath %.S $(ZSTD_SUBDIR)
 

@@ -37,29 +37,28 @@ PYTHON ?= python3
 TESTARTEFACT := versionsTest
 
 DEBUGFLAGS += -g -Wno-c++-compat
-CPPFLAGS   += -I$(LIB_SRCDIR) -I$(LIB_SRCDIR)/common -I$(LIB_SRCDIR)/compress -I$(LIB_SRCDIR)/legacy \
+CPPFLAGS   += -I$(LIB_SRCDIR) -I$(LIB_SRCDIR)/common -I$(LIB_SRCDIR)/compress \
               -I$(LIB_SRCDIR)/dictBuilder -I$(LIB_SRCDIR)/deprecated -I$(PRGDIR) \
               -DZSTD_WINDOW_OVERFLOW_CORRECT_FREQUENTLY=1
 
 ZSTDCOMMON_FILES := $(sort $(ZSTD_COMMON_FILES))
 ZSTDCOMP_FILES   := $(sort $(ZSTD_COMPRESS_FILES))
 ZSTDDECOMP_FILES := $(sort $(ZSTD_DECOMPRESS_FILES))
-ZSTDLEGACY_FILES := $(sort $(wildcard $(LIB_SRCDIR)/legacy/*.c))
-ZSTD_FILES  := $(ZSTDDECOMP_FILES) $(ZSTDCOMMON_FILES) $(ZSTDCOMP_FILES) $(ZSTDLEGACY_FILES)
+ZSTD_FILES  := $(ZSTDDECOMP_FILES) $(ZSTDCOMMON_FILES) $(ZSTDCOMP_FILES)
 ZDICT_FILES := $(sort $(ZSTD_DICTBUILDER_FILES))
 
 ZSTD_F1 := $(sort $(wildcard $(ZSTD_FILES)))
 ZSTD_OBJ1 := $(subst $(LIB_SRCDIR)/common/,zstdm_,$(ZSTD_F1))
 ZSTD_OBJ2 := $(subst $(LIB_SRCDIR)/compress/,zstdc_,$(ZSTD_OBJ1))
 ZSTD_OBJ3 := $(subst $(LIB_SRCDIR)/decompress/,zstdd_,$(ZSTD_OBJ2))
-ZSTD_OBJ4 := $(subst $(LIB_SRCDIR)/legacy/,zstdl_,$(ZSTD_OBJ3))
+ZSTD_OBJ4 := $(ZSTD_OBJ3)
 ZSTD_OBJ5 := $(ZSTD_OBJ4:.c=.o)
 ZSTD_OBJECTS := $(ZSTD_OBJ5:.S=.o)
 
 ZSTDMT_OBJ1 := $(subst $(LIB_SRCDIR)/common/,zstdmt_m_,$(ZSTD_F1))
 ZSTDMT_OBJ2 := $(subst $(LIB_SRCDIR)/compress/,zstdmt_c_,$(ZSTDMT_OBJ1))
 ZSTDMT_OBJ3 := $(subst $(LIB_SRCDIR)/decompress/,zstdmt_d_,$(ZSTDMT_OBJ2))
-ZSTDMT_OBJ4 := $(subst $(LIB_SRCDIR)/legacy/,zstdmt_l_,$(ZSTDMT_OBJ3))
+ZSTDMT_OBJ4 := $(ZSTDMT_OBJ3)
 ZSTDMT_OBJ5 := $(ZSTDMT_OBJ4:.c=.o)
 ZSTDMT_OBJECTS := $(ZSTDMT_OBJ5:.S=.o)
 
@@ -122,9 +121,6 @@ zstdd_%.o : $(LIB_SRCDIR)/decompress/%.c
 zstdd_%.o : $(LIB_SRCDIR)/decompress/%.S
 	$(CC) -c $(CPPFLAGS) $(ASFLAGS) $< -o $@
 
-zstdl_%.o : $(LIB_SRCDIR)/legacy/%.c
-	$(CC) -c $(CPPFLAGS) $(CFLAGS) $< -o $@
-
 zstdmt%.o : CPPFLAGS += $(MULTITHREAD_CPP)
 
 zstdmt_m_%.o : $(LIB_SRCDIR)/common/%.c
@@ -138,9 +134,6 @@ zstdmt_d_%.o : $(LIB_SRCDIR)/decompress/%.c
 
 zstdmt_d_%.o : $(LIB_SRCDIR)/decompress/%.S
 	$(CC) -c $(CPPFLAGS) $(ASFLAGS) $< -o $@
-
-zstdmt_l_%.o : $(LIB_SRCDIR)/legacy/%.c
-	$(CC) -c $(CPPFLAGS) $(CFLAGS) $< -o $@
 
 FULLBENCHS := fullbench fullbench32
 CLEAN += $(FULLBENCHS)
@@ -232,10 +225,6 @@ largeDictionary: $(ZSTDMT_OBJECTS) $(PRGDIR)/datagen.c largeDictionary.c
 CLEAN += invalidDictionaries
 invalidDictionaries : $(ZSTD_OBJECTS) invalidDictionaries.c
 
-CLEAN += legacy
-legacy : CPPFLAGS += -UZSTD_LEGACY_SUPPORT -DZSTD_LEGACY_SUPPORT=4
-legacy : $(ZSTD_FILES) legacy.c
-
 CLEAN += decodecorpus
 decodecorpus : LDLIBS += -lm
 decodecorpus : $(filter-out zstdc_zstd_compress.o, $(ZSTD_OBJECTS)) $(ZDICT_FILES) $(PRGDIR)/util.c $(PRGDIR)/timefn.c decodecorpus.c
@@ -323,7 +312,7 @@ check: test-zstd
 fuzztest: test-fuzzer test-zstream test-decodecorpus
 
 .PHONY: test
-test: test-zstd test-cli-tests test-fullbench test-fuzzer test-zstream test-invalidDictionaries test-legacy test-decodecorpus
+test: test-zstd test-cli-tests test-fullbench test-fuzzer test-zstream test-invalidDictionaries test-decodecorpus
 ifeq ($(QEMU_SYS),)
 test: test-pool
 endif
@@ -404,9 +393,6 @@ test-largeDictionary: largeDictionary
 
 test-invalidDictionaries: invalidDictionaries
 	$(QEMU_SYS) ./invalidDictionaries
-
-test-legacy: legacy
-	$(QEMU_SYS) ./legacy
 
 test-decodecorpus: decodecorpus
 	$(QEMU_SYS) ./decodecorpus -t $(DECODECORPUS_TESTTIME)

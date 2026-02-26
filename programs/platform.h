@@ -12,31 +12,10 @@
 #define PLATFORM_H_MODULE
 
 /* **************************************
-*  Compiler Options
-****************************************/
-#if defined(_MSC_VER)
-#  define _CRT_SECURE_NO_WARNINGS    /* Disable Visual Studio warning messages for fopen, strncpy, strerror */
-#  define _CRT_NONSTDC_NO_WARNINGS   /* Disable C4996 complaining about posix function names */
-#  if (_MSC_VER <= 1800)             /* 1800 == Visual Studio 2013 */
-#    define _CRT_SECURE_NO_DEPRECATE /* VS2005 - must be declared before <io.h> and <windows.h> */
-#    define snprintf sprintf_s       /* snprintf unsupported by Visual <= 2013 */
-#  endif
-#  pragma warning(disable : 4127)    /* disable: C4127: conditional expression is constant */
-#endif
-
-
-/* **************************************
 *  Detect 64-bit OS
-*  https://nadeausoftware.com/articles/2012/02/c_c_tip_how_detect_processor_type_using_compiler_predefined_macros
 ****************************************/
-#if defined __ia64 || defined _M_IA64                                                                               /* Intel Itanium */ \
-  || defined __powerpc64__ || defined __ppc64__ || defined __PPC64__                                                /* POWER 64-bit */  \
-  || (defined __sparc && (defined __sparcv9 || defined __sparc_v9__ || defined __arch64__)) || defined __sparc64__  /* SPARC 64-bit */  \
-  || defined __x86_64__ || defined _M_X64                                                                           /* x86 64-bit */    \
-  || defined __arm64__ || defined __aarch64__ || defined __ARM64_ARCH_8__                                           /* ARM 64-bit */    \
-  || (defined __mips  && (__mips == 64 || __mips == 4 || __mips == 3))                                              /* MIPS 64-bit */   \
-  || (defined(__riscv) && __riscv_xlen == 64)                                                                       /* RISC-V 64-bit */ \
-  || defined _LP64 || defined __LP64__ /* NetBSD, OpenBSD */ || defined __64BIT__ /* AIX */ || defined _ADDR64 /* Cray */               \
+#if defined __arm64__ || defined __aarch64__ || defined __ARM64_ARCH_8__                                           /* ARM 64-bit */    \
+  || defined _LP64 || defined __LP64__                                                                                                 \
   || (defined __SIZEOF_POINTER__ && __SIZEOF_POINTER__ == 8) /* gcc */
 #  if !defined(__64BIT__)
 #    define __64BIT__  1
@@ -127,32 +106,10 @@
 *  testing.
 ************************************************/
 #if (defined(__linux__) && (PLATFORM_POSIX_VERSION > 1)) \
- || (PLATFORM_POSIX_VERSION >= 200112L) \
- || defined(__DJGPP__)
+ || (PLATFORM_POSIX_VERSION >= 200112L)
 #  include <unistd.h>   /* isatty */
 #  include <stdio.h>    /* fileno */
 #  define IS_CONSOLE(stdStream) isatty(fileno(stdStream))
-#elif defined(MSDOS) || defined(OS2)
-#  include <io.h>       /* _isatty */
-#  define IS_CONSOLE(stdStream) _isatty(_fileno(stdStream))
-#elif defined(_WIN32)
-#  include <io.h>      /* _isatty */
-#  include <windows.h> /* DeviceIoControl, HANDLE, FSCTL_SET_SPARSE */
-#  include <stdio.h>   /* FILE */
-
-#if defined (__cplusplus)
-extern "C" {
-#endif
-
-static __inline int IS_CONSOLE(FILE* stdStream) {
-    DWORD dummy;
-    return _isatty(_fileno(stdStream)) && GetConsoleMode((HANDLE)_get_osfhandle(_fileno(stdStream)), &dummy);
-}
-
-#if defined (__cplusplus)
-}
-#endif
-
 #else
 #  define IS_CONSOLE(stdStream) 0
 #endif
@@ -161,22 +118,8 @@ static __inline int IS_CONSOLE(FILE* stdStream) {
 /******************************
 *  OS-specific IO behaviors
 ******************************/
-#if defined(MSDOS) || defined(OS2) || defined(_WIN32)
-#  include <fcntl.h>   /* _O_BINARY */
-#  include <io.h>      /* _setmode, _fileno, _get_osfhandle */
-#  if !defined(__DJGPP__)
-#    include <windows.h> /* DeviceIoControl, HANDLE, FSCTL_SET_SPARSE */
-#    include <winioctl.h> /* FSCTL_SET_SPARSE */
-#    define SET_BINARY_MODE(file) { int const unused=_setmode(_fileno(file), _O_BINARY); (void)unused; }
-#    define SET_SPARSE_FILE_MODE(file) { DWORD dw; DeviceIoControl((HANDLE) _get_osfhandle(_fileno(file)), FSCTL_SET_SPARSE, 0, 0, 0, 0, &dw, 0); }
-#  else
-#    define SET_BINARY_MODE(file) setmode(fileno(file), O_BINARY)
-#    define SET_SPARSE_FILE_MODE(file)
-#  endif
-#else
-#  define SET_BINARY_MODE(file)
-#  define SET_SPARSE_FILE_MODE(file)
-#endif
+#define SET_BINARY_MODE(file)
+#define SET_SPARSE_FILE_MODE(file)
 
 
 #ifndef ZSTD_SPARSE_DEFAULT

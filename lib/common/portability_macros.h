@@ -74,33 +74,9 @@
 # define ZSTD_HIDE_ASM_FUNCTION(func)
 #endif
 
-/* Compile time determination of BMI2 support */
-#ifndef STATIC_BMI2
-#  if defined(__BMI2__)
-#    define STATIC_BMI2 1
-#  elif defined(_MSC_VER) && defined(__AVX2__)
-#    define STATIC_BMI2 1 /* MSVC does not have a BMI2 specific flag, but every CPU that supports AVX2 also supports BMI2 */
-#  endif
-#endif
-
-#ifndef STATIC_BMI2
-#  define STATIC_BMI2 0
-#endif
-
-/* Enable runtime BMI2 dispatch based on the CPU.
- * Enabled for clang & gcc >=4.8 on x86 when BMI2 isn't enabled by default.
- */
-#ifndef DYNAMIC_BMI2
-#  if ((defined(__clang__) && __has_attribute(__target__)) \
-      || (defined(__GNUC__) \
-          && (__GNUC__ >= 5 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 8)))) \
-      && (defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)) \
-      && !defined(__BMI2__)
-#    define DYNAMIC_BMI2 1
-#  else
-#    define DYNAMIC_BMI2 0
-#  endif
-#endif
+/* BMI2 is an x86 feature, not available on ARM64 */
+#define STATIC_BMI2 0
+#define DYNAMIC_BMI2 0
 
 /**
  * Only enable assembly for GNU C compatible compilers,
@@ -129,44 +105,10 @@
 #  define ZSTD_ASM_SUPPORTED 0
 #endif
 
-/**
- * Determines whether we should enable assembly for x86-64
- * with BMI2.
- *
- * Enable if all of the following conditions hold:
- * - ASM hasn't been explicitly disabled by defining ZSTD_DISABLE_ASM
- * - Assembly is supported
- * - We are compiling for x86-64 and either:
- *   - DYNAMIC_BMI2 is enabled
- *   - BMI2 is supported at compile time
- */
-#if !defined(ZSTD_DISABLE_ASM) &&                                 \
-    ZSTD_ASM_SUPPORTED &&                                         \
-    defined(__x86_64__) &&                                        \
-    (DYNAMIC_BMI2 || defined(__BMI2__))
-# define ZSTD_ENABLE_ASM_X86_64_BMI2 1
-#else
-# define ZSTD_ENABLE_ASM_X86_64_BMI2 0
-#endif
+/* x86-64 BMI2 assembly not available on ARM64 */
+#define ZSTD_ENABLE_ASM_X86_64_BMI2 0
 
-/*
- * For x86 ELF targets, add .note.gnu.property section for Intel CET in
- * assembly sources when CET is enabled.
- *
- * Additionally, any function that may be called indirectly must begin
- * with ZSTD_CET_ENDBRANCH.
- */
-#if defined(__ELF__) && (defined(__x86_64__) || defined(__i386__)) \
-    && defined(__has_include)
-# if __has_include(<cet.h>)
-#  include <cet.h>
-#  define ZSTD_CET_ENDBRANCH _CET_ENDBR
-# endif
-#endif
-
-#ifndef ZSTD_CET_ENDBRANCH
-# define ZSTD_CET_ENDBRANCH
-#endif
+#define ZSTD_CET_ENDBRANCH
 
 /**
  * ZSTD_IS_DETERMINISTIC_BUILD must be set to 0 if any compilation macro is
