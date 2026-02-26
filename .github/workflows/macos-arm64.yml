@@ -5,6 +5,8 @@ on:
     branches: [ dev, main ]
   pull_request:
     branches: [ dev, main ]
+  release:
+    types: [ published ]
 
 jobs:
   build-and-test:
@@ -17,3 +19,64 @@ jobs:
         run: make CC=$(brew --prefix llvm)/bin/clang
       - name: Check
         run: make check CC=$(brew --prefix llvm)/bin/clang
+
+  bottle:
+    if: github.event_name == 'release'
+    runs-on: macos-latest
+    needs: build-and-test
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM
+        run: brew install llvm
+
+      - name: Build zstd
+        run: |
+          make CC=$(brew --prefix llvm)/bin/clang
+
+      - name: Package bottle
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PREFIX="$(pwd)/bottle/zstd-vk/${VERSION}"
+
+          mkdir -p "${PREFIX}/bin" "${PREFIX}/share/man/man1"
+          cp programs/zstd "${PREFIX}/bin/zstd-vk"
+          cp programs/zstd.1 "${PREFIX}/share/man/man1/zstd-vk.1"
+
+          # Detect macOS version for bottle tag
+          OS_VERSION=$(sw_vers -productVersion | cut -d. -f1)
+          case "${OS_VERSION}" in
+            15) BOTTLE_TAG="arm64_sequoia" ;;
+            14) BOTTLE_TAG="arm64_sonoma" ;;
+            13) BOTTLE_TAG="arm64_ventura" ;;
+            *)  BOTTLE_TAG="arm64_sonoma" ;;
+          esac
+
+          BOTTLE_NAME="zstd-vk--${VERSION}.${BOTTLE_TAG}.bottle.tar.gz"
+          tar -czf "${BOTTLE_NAME}" -C bottle zstd-vk
+          echo "BOTTLE_NAME=${BOTTLE_NAME}" >> "$GITHUB_ENV"
+          echo "BOTTLE_TAG=${BOTTLE_TAG}" >> "$GITHUB_ENV"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+          SHA256=$(shasum -a 256 "${BOTTLE_NAME}" | cut -d' ' -f1)
+          echo "BOTTLE_SHA256=${SHA256}" >> "$GITHUB_ENV"
+
+      - name: Upload bottle to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" "${BOTTLE_NAME}"
+
+      - name: Print bottle block for formula
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "Add this to Formula/zstd-vk.rb:"
+          echo "=========================================="
+          echo ""
+          echo "  bottle do"
+          echo "    root_url \"https://github.com/vibekernels/zstd-vk-macos-arm64/releases/download/${GITHUB_REF_NAME}\""
+          echo "    sha256 cellar: :any_skip_relocation, ${BOTTLE_TAG}: \"${BOTTLE_SHA256}\""
+          echo "  end"
+          echo ""
