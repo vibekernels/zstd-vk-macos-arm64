@@ -2,9 +2,9 @@ name: Android NDK Build
 
 on:
   pull_request:
-    branches: [ dev, release, actionsTest ]
+    branches: [ disabled-for-testing ]
   push:
-    branches: [ actionsTest, '*ndk*' ]
+    branches: [ disabled-for-testing ]
 
 permissions: read-all
 

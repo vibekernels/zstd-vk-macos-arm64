@@ -2,10 +2,10 @@ name: facebook/zstd/commit
 on:
   push:
     branches:
-    - dev
+    - disabled-for-testing
   pull_request:
     branches:
-    - dev
+    - disabled-for-testing
 
 permissions: read-all
 

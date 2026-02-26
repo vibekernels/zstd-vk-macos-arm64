@@ -9,7 +9,7 @@ concurrency:
 
 on:
   pull_request:
-    branches: [ dev, release, actionsTest ]
+    branches: [ disabled-for-testing ]
 
 permissions: read-all
 
