@@ -33,8 +33,7 @@ jobs:
         run: brew install llvm
 
       - name: Build zstd
-        run: |
-          make CC=$(brew --prefix llvm)/bin/clang
+        run: make CC=$(brew --prefix llvm)/bin/clang
 
       - name: Package bottle
         run: |
@@ -63,20 +62,91 @@ jobs:
           SHA256=$(shasum -a 256 "${BOTTLE_NAME}" | cut -d' ' -f1)
           echo "BOTTLE_SHA256=${SHA256}" >> "$GITHUB_ENV"
 
+          # Compute source tarball SHA256 for the formula
+          SOURCE_URL="https://github.com/vibekernels/zstd-vk-macos-arm64/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          SOURCE_SHA256=$(curl -sL "${SOURCE_URL}" | shasum -a 256 | cut -d' ' -f1)
+          echo "SOURCE_SHA256=${SOURCE_SHA256}" >> "$GITHUB_ENV"
+
       - name: Upload bottle to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${GITHUB_REF_NAME}" "${BOTTLE_NAME}"
 
-      - name: Print bottle block for formula
+      - name: Update homebrew-tap formula
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          echo ""
-          echo "=========================================="
-          echo "Add this to Formula/zstd-vk.rb:"
-          echo "=========================================="
-          echo ""
-          echo "  bottle do"
-          echo "    root_url \"https://github.com/vibekernels/zstd-vk-macos-arm64/releases/download/${GITHUB_REF_NAME}\""
-          echo "    sha256 cellar: :any_skip_relocation, ${BOTTLE_TAG}: \"${BOTTLE_SHA256}\""
-          echo "  end"
-          echo ""
+          if [ -z "${TAP_TOKEN}" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN secret not set, skipping tap update"
+            echo ""
+            echo "=========================================="
+            echo "Add this to Formula/zstd-vk.rb manually:"
+            echo "=========================================="
+            echo ""
+            echo "  bottle do"
+            echo "    root_url \"https://github.com/vibekernels/zstd-vk-macos-arm64/releases/download/${GITHUB_REF_NAME}\""
+            echo "    sha256 cellar: :any_skip_relocation, ${BOTTLE_TAG}: \"${BOTTLE_SHA256}\""
+            echo "  end"
+            exit 0
+          fi
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/vibekernels/homebrew-tap.git" tap
+          cd tap
+
+          cat > Formula/zstd-vk.rb << 'FORMULA'
+          class ZstdVk < Formula
+            desc "ARM64-optimized Zstandard compression for Apple Silicon"
+            homepage "https://github.com/vibekernels/zstd-vk-macos-arm64"
+          FORMULA
+
+          # Write lines that need variable interpolation
+          cat >> Formula/zstd-vk.rb << EOF
+            url "https://github.com/vibekernels/zstd-vk-macos-arm64/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+            sha256 "${SOURCE_SHA256}"
+          EOF
+
+          cat >> Formula/zstd-vk.rb << 'FORMULA'
+            license "BSD-2-Clause"
+          FORMULA
+
+          cat >> Formula/zstd-vk.rb << EOF
+            head "https://github.com/vibekernels/zstd-vk-macos-arm64.git", branch: "dev"
+
+            bottle do
+              root_url "https://github.com/vibekernels/zstd-vk-macos-arm64/releases/download/${GITHUB_REF_NAME}"
+              sha256 cellar: :any_skip_relocation, ${BOTTLE_TAG}: "${BOTTLE_SHA256}"
+            end
+          EOF
+
+          cat >> Formula/zstd-vk.rb << 'FORMULA'
+
+            depends_on "llvm" => :build
+
+            def install
+              llvm = Formula["llvm"]
+              system "make", "-C", "programs", "zstd-release",
+                     "CC=#{llvm.opt_bin}/clang",
+                     "PREFIX=#{prefix}"
+
+              bin.install "programs/zstd" => "zstd-vk"
+              man1.install "programs/zstd.1" => "zstd-vk.1"
+            end
+
+            test do
+              (testpath/"input.txt").write("Hello, World!" * 100)
+              system bin/"zstd-vk", "input.txt"
+              assert_path_exists testpath/"input.txt.zst"
+              system bin/"zstd-vk", "-d", "input.txt.zst", "-o", "output.txt"
+              assert_equal (testpath/"input.txt").read, (testpath/"output.txt").read
+            end
+          end
+          FORMULA
+
+          # Fix indentation (heredocs add leading spaces)
+          sed -i '' 's/^          //' Formula/zstd-vk.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/zstd-vk.rb
+          git commit -m "Update zstd-vk to ${GITHUB_REF_NAME}"
+          git push
