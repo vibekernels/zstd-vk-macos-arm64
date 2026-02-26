@@ -3,13 +3,6 @@ This is an experimental fork of [zstd](https://github.com/facebook/zstd) that is
 ## Build
 
 ```bash
-cmake -S . -B build-cmake
-cmake --build build-cmake
-```
-
-Or simply:
-
-```bash
 make
 ```
 
