@@ -627,6 +627,20 @@ jobs:
         make -C programs zstd-pgo
         ./programs/zstd -b
 
+  gcc-hybrid-pgo:
+    runs-on: macos-14
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # tag=v6.0.2
+    - name: Install GCC
+      run: |
+        brew install gcc
+    - name: Build hybrid PGO Zstd with GCC + Clang
+      run: |
+        make -C programs zstd-hybrid-pgo
+    - name: Smoke test
+      run: |
+        ./programs/zstd -b
+
   musl-build:
     runs-on: ubuntu-22.04
     steps:

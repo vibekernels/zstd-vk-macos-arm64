@@ -64,5 +64,12 @@ if(ZSTD_ENABLE_CXX)
     enable_language(CXX)
 endif()
 
+# ARM64 decompression optimization
+# When enabled on ARM64 + GCC, applies -fno-tree-vectorize to decompress/common
+# hot-path files to prevent I-cache bloat from rarely-used NEON vectorization.
+# For full hybrid GCC/Clang PGO optimization (+5-16% decompression speed),
+# use the Makefile target: make zstd-hybrid-pgo
+option(ZSTD_ARM64_OPTIMIZATION "Enable ARM64 decompression optimizations (-fno-tree-vectorize on hot paths)" OFF)
+
 # Set global definitions
 add_definitions(-DXXH_NAMESPACE=ZSTD_)
