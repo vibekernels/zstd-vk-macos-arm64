@@ -20,8 +20,14 @@ jobs:
           LLVM_CC="$(brew --prefix llvm)/bin/clang"
           echo "Using: ${LLVM_CC}"
           ${LLVM_CC} --version
+      - name: Debug env
+        run: |
+          echo "CFLAGS=$CFLAGS"
+          echo "CPPFLAGS=$CPPFLAGS"
+          echo "LDFLAGS=$LDFLAGS"
+          echo "MOREFLAGS=$MOREFLAGS"
       - name: Build
-        run: make CC="$(brew --prefix llvm)/bin/clang" MOREFLAGS="-mcpu=apple-m1"
+        run: make V=1 CC="$(brew --prefix llvm)/bin/clang" MOREFLAGS="-mcpu=apple-m1"
       - name: Check
         run: make check CC="$(brew --prefix llvm)/bin/clang" MOREFLAGS="-mcpu=apple-m1"
       - name: Prepare artifact
