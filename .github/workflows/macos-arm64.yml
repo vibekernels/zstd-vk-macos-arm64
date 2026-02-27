@@ -63,7 +63,7 @@ jobs:
             *)  BOTTLE_TAG="arm64_sonoma" ;;
           esac
 
-          BOTTLE_NAME="zstd-vk--${VERSION}.${BOTTLE_TAG}.bottle.tar.gz"
+          BOTTLE_NAME="zstd-vk-${VERSION}.${BOTTLE_TAG}.bottle.tar.gz"
           tar -czf "${BOTTLE_NAME}" -C bottle zstd-vk
           echo "BOTTLE_NAME=${BOTTLE_NAME}" >> "$GITHUB_ENV"
           echo "BOTTLE_TAG=${BOTTLE_TAG}" >> "$GITHUB_ENV"
