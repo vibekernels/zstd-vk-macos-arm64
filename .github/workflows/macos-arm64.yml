@@ -25,7 +25,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zstd-vk-macos-arm64
+          name: zstd-vk
           path: artifact/
       - name: Check
         run: make check CC="$(brew --prefix llvm)/bin/clang" MOREFLAGS="-mcpu=apple-m1"
@@ -73,7 +73,7 @@ jobs:
           echo "BOTTLE_SHA256=${SHA256}" >> "$GITHUB_ENV"
 
           # Compute source tarball SHA256 for the formula
-          SOURCE_URL="https://github.com/vibekernels/zstd-vk-macos-arm64/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          SOURCE_URL="https://github.com/vibekernels/zstd-vk/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
           SOURCE_SHA256=$(curl -sL "${SOURCE_URL}" | shasum -a 256 | cut -d' ' -f1)
           echo "SOURCE_SHA256=${SOURCE_SHA256}" >> "$GITHUB_ENV"
 
@@ -94,7 +94,7 @@ jobs:
             echo "=========================================="
             echo ""
             echo "  bottle do"
-            echo "    root_url \"https://github.com/vibekernels/zstd-vk-macos-arm64/releases/download/${GITHUB_REF_NAME}\""
+            echo "    root_url \"https://github.com/vibekernels/zstd-vk/releases/download/${GITHUB_REF_NAME}\""
             echo "    sha256 cellar: :any_skip_relocation, ${BOTTLE_TAG}: \"${BOTTLE_SHA256}\""
             echo "  end"
             exit 0
@@ -106,12 +106,12 @@ jobs:
           cat > Formula/zstd-vk.rb << 'FORMULA'
           class ZstdVk < Formula
             desc "ARM64-optimized Zstandard compression for Apple Silicon"
-            homepage "https://github.com/vibekernels/zstd-vk-macos-arm64"
+            homepage "https://github.com/vibekernels/zstd-vk"
           FORMULA
 
           # Write lines that need variable interpolation
           cat >> Formula/zstd-vk.rb << EOF
-            url "https://github.com/vibekernels/zstd-vk-macos-arm64/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+            url "https://github.com/vibekernels/zstd-vk/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
             sha256 "${SOURCE_SHA256}"
           EOF
 
@@ -120,10 +120,10 @@ jobs:
           FORMULA
 
           cat >> Formula/zstd-vk.rb << EOF
-            head "https://github.com/vibekernels/zstd-vk-macos-arm64.git", branch: "main"
+            head "https://github.com/vibekernels/zstd-vk.git", branch: "main"
 
             bottle do
-              root_url "https://github.com/vibekernels/zstd-vk-macos-arm64/releases/download/${GITHUB_REF_NAME}"
+              root_url "https://github.com/vibekernels/zstd-vk/releases/download/${GITHUB_REF_NAME}"
               sha256 cellar: :any_skip_relocation, ${BOTTLE_TAG}: "${BOTTLE_SHA256}"
             end
           EOF
