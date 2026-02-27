@@ -1,6 +1,13 @@
 This is an experimental fork of [zstd](https://github.com/facebook/zstd) that is AI-optimized for speed on Apple Silicon (macOS arm64). It is not intended for production use.
 
-## Build
+## Install
+
+```bash
+brew tap vibekernels/tap
+brew install zstd-vk
+```
+
+## Build from source
 
 ```bash
 make
