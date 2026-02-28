@@ -523,6 +523,15 @@ Three optimizations to `ZSTD_compressBlock_doubleFast_noDict_generic`:
 | `-Os` or `-O2` for doubleFast compilation unit | -1% | -O3 is optimal for this code |
 | `-fno-unroll-loops` | neutral | Compiler wasn't unrolling the do-while loop anyway |
 | Remove step-increase prefetches | neutral | Neither helped nor hurt |
+| Hash pipeline (save hs0 across iterations, skip recompute) | neutral | OoO execution already hides the 3-cycle multiply latency |
+| Add hashLong prefetch for ip1 at loop bottom | -3.5% | Extra hash compute + prefetch instruction pressure exceeds latency benefit |
+| `-mcpu=apple-m1` flag for doubleFast | -0.6% | M1-specific scheduling hints slightly hurt; matches decompression finding |
+| Replace hashSmall prefetch with hashLong prefetch | neutral | hashLong entry already loaded as idxl0; prefetch is redundant data-wise |
+| Outer loop hashSmall prefetch (before first inner iteration) | neutral | Outer loop runs once per match found; first iteration miss amortized |
+| Backward sequence prefetch in ZSTD_encodeSequences | neutral | Sequences still warm in cache from being written during compression |
+| `longOffsets=0` compile-time constant on 64-bit | -0.8% | Well-predicted branches cost zero on M1; removing changes code layout |
+| GCC-15 for entropy encoding (zstd_compress_sequences.c) | -0.3% | Clang's encoding codegen is adequate; GCC doesn't help here |
+| GCC-15 -O3 with vectorize for encoding | -0.3% | Same as above |
 
 ### Key M1 Insights for Compression
 
@@ -533,3 +542,13 @@ Three optimizations to `ZSTD_compressBlock_doubleFast_noDict_generic`:
 3. **Code size matters for M1's uop cache** — doubling the number of template instantiations (8 variants vs 4) showed no benefit because only one variant runs at a time. The extra code just wastes instruction cache space.
 
 4. **Register pressure is critical** — the doubleFast inner loop uses ~27 of 28 available general-purpose registers. Any optimization that adds live variables must offset the spill cost.
+
+5. **Only ONE prefetch per iteration is sustainable** — adding a single hashSmall prefetch helps +1.7%, but adding a second (hashLong for ip1) causes -3.5%. The instruction budget in the inner loop is tight; each extra instruction displaces useful work. The hashSmall prefetch specifically helps because the lookup would otherwise be an L2 miss (~10 cycle stall).
+
+6. **Well-predicted branches are free on M1** — eliminating the `longOffsets` branch in `ZSTD_encodeSequences` (always false on 64-bit) actually HURT performance by -0.8%. The branch predictor handles perfectly-predicted branches with zero overhead; removing them changes code layout and instruction cache behavior negatively.
+
+7. **The hashSmall prefetch is the single highest-value optimization** — confirmed at +1.7% (higher than the original +1.0% estimate). Without it, compression drops to 291 MB/s. The 256KB hashSmall table (~50% fit in 128KB L1D) creates frequent L2 misses that the prefetch hides.
+
+8. **Entropy encoding and histogram are resistant to optimization** — GCC-15 for the encoding path is neutral-to-worse. Backward sequence prefetching is neutral (data still warm from compression). The encoding loop is well-optimized by Clang.
+
+9. **The optimization is at ceiling for source-level changes** — 20+ additional ideas were tested across two sessions beyond the initial 4 successful optimizations. All were neutral or regressive. The remaining bottleneck is the hashLong[hl1] load latency (~10 cycles for L2), which requires knowing ip1's data (from L1) and computing the hash (3 cycles) first. This ~13-cycle critical path cannot be reduced without hardware changes or algorithmic restructuring.
