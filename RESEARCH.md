@@ -536,6 +536,8 @@ Three optimizations to `ZSTD_compressBlock_doubleFast_noDict_generic`:
 | hashLong prefetch pipeline (compute hl1 at end of prev iteration, prefetch hashLong[hl1]) | neutral | OoO engine already overlaps the L2 load with match checks; extra hash + prefetch + branch offsets the small remaining benefit |
 | Smaller hash tables (hashLog=14, chainLog=13, fits in L1) | +7% speed, -4.6% ratio | All lookups become L1 hits; but too many hash collisions degrade match quality unacceptably |
 | Remove hashLong complementary insertion (keep hashSmall only) | +1.4% speed, -2.4% ratio | Reduces post-match work (3 fewer hash computes + stores); but hashLong insertions are essential for finding long matches at nearby positions |
+| Hand-modified assembly: interleave hashLong with repcode check | neutral (298.7 vs 298.2 baseline) | Moved `ldr x30, [x6]` (ip1 data load) and `mul x28, x30, x21` (hashLong hash) before the repcode `cmp`/`b.eq`, starting the hashLong critical path ~6 cycles earlier. OoO engine already reorders these identically — explicit scheduling adds no benefit |
+| Hand-modified assembly: hashLong prefetch at loop bottom | neutral (297.7 vs 298.2 baseline) | Added `mul/lsr/add/prfm` for hashLong after the existing hashSmall prefetch at LBB1_381. The prefetch doesn't fire early enough: only ~5 cycles of lead time before the L2 load, insufficient for the ~10-cycle L2 latency |
 
 ### Key M1 Insights for Compression
 
@@ -555,9 +557,11 @@ Three optimizations to `ZSTD_compressBlock_doubleFast_noDict_generic`:
 
 8. **Entropy encoding and histogram are resistant to optimization** — GCC-15 for the encoding path is neutral-to-worse. Backward sequence prefetching is neutral (data still warm from compression). The encoding loop is well-optimized by Clang.
 
-9. **The optimization is at ceiling for source-level changes** — 25+ additional ideas were tested across three sessions beyond the initial 4 successful optimizations. All were neutral or regressive. Assembly analysis shows the inner loop runs at ~11 cycles/iteration: the OoO engine hides ~7 cycles of the ~18-cycle hashLong dependency chain by overlapping with match checks. Further gains would require algorithmic restructuring (different match-finding strategy) or hardware changes.
+9. **The optimization is at ceiling for both source-level and assembly-level changes** — 25+ source-level ideas plus 2 hand-written assembly modifications were tested beyond the initial 4 successful optimizations. All were neutral or regressive. Assembly analysis shows the inner loop runs at ~11 cycles/iteration: the OoO engine hides ~7 cycles of the ~18-cycle hashLong dependency chain by overlapping with match checks. Hand-tuned instruction scheduling cannot improve on this. Further gains would require algorithmic restructuring (different match-finding strategy) or hardware changes.
 
-10. **CRC32C is not faster than multiply on Apple M1** — despite the CRC32C instruction (`crc32cx`) being advertised as low-latency on ARM, benchmarking shows the same 3-cycle latency as integer multiply. Critically, the multiply unit can sustain 2 ops/cycle throughput while the CRC32C unit is limited to 1/cycle. Since the doubleFast inner loop needs 3 hash computations per iteration, this throughput bottleneck causes a -7% regression.
+10. **Hand-written assembly cannot beat M1's out-of-order engine** — Two assembly modifications were tested on the mls=5 inner loop: (a) interleaving the hashLong computation (ip1 data load + multiply) with the repcode check to start the critical path ~6 cycles earlier, and (b) adding a hashLong prefetch at the loop bottom alongside the existing hashSmall prefetch. Both were neutral within noise (~0.2%). The M1's reorder buffer (~630 entries) can see ~25 iterations ahead at ~25 instructions/iteration, providing more than enough window to overlap L2 misses with useful work. All 30 GP registers are in use (x18 is Apple's platform register), leaving no room for software pipelining. Loop header alignment was confirmed at 16-byte boundary (no fetch penalty).
+
+11. **CRC32C is not faster than multiply on Apple M1** — despite the CRC32C instruction (`crc32cx`) being advertised as low-latency on ARM, benchmarking shows the same 3-cycle latency as integer multiply. Critically, the multiply unit can sustain 2 ops/cycle throughput while the CRC32C unit is limited to 1/cycle. Since the doubleFast inner loop needs 3 hash computations per iteration, this throughput bottleneck causes a -7% regression.
 
 ### Untried Future Ideas
 
