@@ -532,6 +532,10 @@ Three optimizations to `ZSTD_compressBlock_doubleFast_noDict_generic`:
 | `longOffsets=0` compile-time constant on 64-bit | -0.8% | Well-predicted branches cost zero on M1; removing changes code layout |
 | GCC-15 for entropy encoding (zstd_compress_sequences.c) | -0.3% | Clang's encoding codegen is adequate; GCC doesn't help here |
 | GCC-15 -O3 with vectorize for encoding | -0.3% | Same as above |
+| CRC32C hash (`crc32cx`) instead of multiply-shift | -7% | CRC32C has same latency as MUL (3cy) but worse throughput (1/cy vs 2/cy); 3 hashes/iteration bottlenecks on CRC unit |
+| hashLong prefetch pipeline (compute hl1 at end of prev iteration, prefetch hashLong[hl1]) | neutral | OoO engine already overlaps the L2 load with match checks; extra hash + prefetch + branch offsets the small remaining benefit |
+| Smaller hash tables (hashLog=14, chainLog=13, fits in L1) | +7% speed, -4.6% ratio | All lookups become L1 hits; but too many hash collisions degrade match quality unacceptably |
+| Remove hashLong complementary insertion (keep hashSmall only) | +1.4% speed, -2.4% ratio | Reduces post-match work (3 fewer hash computes + stores); but hashLong insertions are essential for finding long matches at nearby positions |
 
 ### Key M1 Insights for Compression
 
@@ -551,4 +555,20 @@ Three optimizations to `ZSTD_compressBlock_doubleFast_noDict_generic`:
 
 8. **Entropy encoding and histogram are resistant to optimization** — GCC-15 for the encoding path is neutral-to-worse. Backward sequence prefetching is neutral (data still warm from compression). The encoding loop is well-optimized by Clang.
 
-9. **The optimization is at ceiling for source-level changes** — 20+ additional ideas were tested across two sessions beyond the initial 4 successful optimizations. All were neutral or regressive. The remaining bottleneck is the hashLong[hl1] load latency (~10 cycles for L2), which requires knowing ip1's data (from L1) and computing the hash (3 cycles) first. This ~13-cycle critical path cannot be reduced without hardware changes or algorithmic restructuring.
+9. **The optimization is at ceiling for source-level changes** — 25+ additional ideas were tested across three sessions beyond the initial 4 successful optimizations. All were neutral or regressive. Assembly analysis shows the inner loop runs at ~11 cycles/iteration: the OoO engine hides ~7 cycles of the ~18-cycle hashLong dependency chain by overlapping with match checks. Further gains would require algorithmic restructuring (different match-finding strategy) or hardware changes.
+
+10. **CRC32C is not faster than multiply on Apple M1** — despite the CRC32C instruction (`crc32cx`) being advertised as low-latency on ARM, benchmarking shows the same 3-cycle latency as integer multiply. Critically, the multiply unit can sustain 2 ops/cycle throughput while the CRC32C unit is limited to 1/cycle. Since the doubleFast inner loop needs 3 hash computations per iteration, this throughput bottleneck causes a -7% regression.
+
+### Untried Future Ideas
+
+These ideas have not been tested and may offer further gains. They are listed roughly in order of expected payoff. Note: smaller hash tables (idea #2 original) and hashLong prefetch pipeline have been tested and found wanting (see table above).
+
+1. **Batch/interleave multiple positions** — Process 2-4 positions simultaneously: compute all hashes, issue all hash table loads, then check all matches. This maximally overlaps independent L2 loads. Risk: significantly increases register pressure (already at 27/28), likely requiring stack spills that could offset gains. Note: the OoO engine already hides ~7 of 18 dependency-chain cycles, so the theoretical gain is limited to ~6 cycles (~35%).
+
+2. **Hash table with embedded match data** — Store the first 4-8 bytes of the match candidate alongside the index in the hash table entry. This allows validating the match without a random access to `base + idx`. Doubles hash table size (worse cache behavior) but eliminates one L2 load from the critical path. Requires format-compatible changes (only affects match finding, not the bitstream).
+
+3. **Two-level hash table (hot cache + cold table)** — Maintain a small (~8KB) L1-resident "hot cache" mapping recent hashes to positions. On miss, fall through to the full hash table. The hot cache captures temporal locality (recently written positions are likely to be read soon). Implementation complexity is moderate.
+
+4. **Speculative position skipping** — When no match is found, skip ahead by more than `step` using a simple heuristic (e.g., if the next byte is also a miss in the small hash table, skip by 2*step). This reduces the number of hash table probes per byte of input. Risk: may miss short matches that the current algorithm catches.
+
+5. **NEON-parallel hash computation** — Use NEON vector instructions to compute 2 hashes (small + long) in parallel for the same position. The NEON multiply has 4-cycle latency but operates on a separate execution unit, potentially freeing the integer multiply unit. Risk: NEON<->GP register transfers cost 2 cycles on M1, which may negate the parallelism benefit.
