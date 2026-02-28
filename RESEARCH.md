@@ -558,6 +558,7 @@ Three optimizations to `ZSTD_compressBlock_doubleFast_noDict_generic`:
 | `-mllvm -enable-post-misched` for doubleFast | neutral (~299 MB/s) | Post-register-allocation machine scheduler doesn't improve over default scheduling |
 | `-mllvm -aggressive-ext-opt` for doubleFast | neutral (297.5 MB/s) | Aggressive extension optimization has no effect |
 | `-mllvm -aarch64-enable-ldst-opt` for doubleFast | neutral (295.9 MB/s) | Load/store optimization already enabled by default |
+| Outer loop hashLong prefetch (after complementary insertion) | -0.9% (295.3 MB/s) | Prefetch `hashLong[hash(ip)]` before repcode chain check; insufficient lead time (~5 instructions before actual use in outer loop) and wasted if repcode found |
 
 ### Key M1 Insights for Compression
 
