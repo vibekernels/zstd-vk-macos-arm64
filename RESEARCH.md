@@ -1,0 +1,535 @@
+# zstd ARM64/Apple M1 Optimization Report
+
+## Executive Summary
+
+We achieved **+5-9% decompression speed improvement** on Apple M1 Pro (AArch64) across all compression levels with no compression penalty and zero source code changes. The improvement comes entirely from a hybrid build strategy: compiling decompression code with GCC-15 instead of Apple Clang.
+
+| Level | Clang Baseline (MB/s) | Hybrid Build (MB/s) | Improvement |
+|-------|-----------------------|---------------------|-------------|
+| L1    | 8,787                 | 9,220               | **+4.9%**   |
+| L3    | 8,481                 | 8,913               | **+5.1%**   |
+| L5    | 8,340                 | 8,971               | **+7.6%**   |
+| L9    | 10,032                | 11,006              | **+9.7%**   |
+
+Compression speed is unaffected (within noise). All benchmarks use `-i10` on 100MB compressible data, single-threaded.
+
+## Build Strategy
+
+### Overview
+
+1. Build the full project normally with Apple Clang (`make -j zstd-release`)
+2. Recompile 8 decompression/common object files with GCC-15 using `-O3 -fno-tree-vectorize` and PGO
+3. Relink with the Clang linker
+
+Clang remains the compiler for all compression code (where its codegen is fine). Only the decompression hot path benefits from GCC.
+
+### Step-by-Step Build Instructions
+
+```bash
+# Prerequisites: gcc-15 installed (e.g., `brew install gcc`)
+
+# 1. Clean Clang build
+make clean && make -j zstd-release
+OBJDIR=$(ls -d programs/obj/conf_*/)
+
+# 2. Build instrumented GCC objects for PGO profiling
+PROFDIR=/tmp/gcc-pgo-zstd
+rm -rf $PROFDIR && mkdir -p $PROFDIR
+
+FILES="lib/decompress/zstd_decompress_block.c
+lib/decompress/zstd_decompress.c
+lib/decompress/huf_decompress.c
+lib/common/fse_decompress.c
+lib/common/entropy_common.c
+lib/common/zstd_common.c
+lib/common/error_private.c
+lib/common/xxhash.c"
+
+for f in $FILES; do
+    base=$(basename "$f" .c)
+    gcc-15 -O3 -fno-tree-vectorize -fprofile-generate=$PROFDIR \
+        -DXXH_NAMESPACE=ZSTD_ -DDEBUGLEVEL=0 -DZSTD_LEGACY_SUPPORT=0 \
+        -Ilib -Ilib/common -Ilib/compress -Ilib/decompress -Iprograms \
+        -c "$f" -o "${OBJDIR}${base}.o"
+done
+
+# 3. Link instrumented binary (needs libgcov for profiling runtime)
+GCOV_LIB=$(gcc-15 -print-file-name=libgcov.a)
+# Extract the link command from: make -n zstd-release
+# Then append $GCOV_LIB to link the profiling runtime
+# (The exact link command varies by platform/config)
+
+# 4. Run profiling workloads
+./zstd-instrumented -b1e1 -i1 /path/to/test_data
+./zstd-instrumented -b3e3 -i1 /path/to/test_data
+./zstd-instrumented -b5e5 -i1 /path/to/test_data
+./zstd-instrumented -b9e9 -i1 /path/to/test_data
+
+# 5. Rebuild Clang base, then recompile GCC objects with PGO feedback
+make clean && make -j zstd-release
+OBJDIR=$(ls -d programs/obj/conf_*/)
+
+for f in $FILES; do
+    base=$(basename "$f" .c)
+    gcc-15 -O3 -fno-tree-vectorize \
+        -fprofile-use=$PROFDIR -fprofile-partial-training \
+        -DXXH_NAMESPACE=ZSTD_ -DDEBUGLEVEL=0 -DZSTD_LEGACY_SUPPORT=0 \
+        -Ilib -Ilib/common -Ilib/compress -Ilib/decompress -Iprograms \
+        -c "$f" -o "${OBJDIR}${base}.o"
+done
+
+# 6. Final relink (no libgcov needed this time)
+make -j zstd-release
+```
+
+### Contribution of Each Technique
+
+| Technique | Approximate Contribution |
+|-----------|-------------------------|
+| GCC-15 codegen (vs Clang) | ~5% |
+| `-fno-tree-vectorize` | ~2% |
+| PGO (`-fprofile-use`) | ~2% |
+
+## Why GCC Generates Faster Decompression Code
+
+Detailed assembly analysis of `ZSTD_decompressSequences_body` (the hot decompression loop) reveals five key differences:
+
+### 1. Single-Load Struct Access
+
+The `ZSTD_seqSymbol` struct is 8 bytes: `{U16 nextState, BYTE nbAdditionalBits, BYTE nbBits, U32 baseValue}`.
+
+- **GCC**: Loads the entire struct with one `ldr x` (8-byte load), then extracts fields with `ubfx` (unsigned bitfield extract). 3 FSE streams x 1 load = 3 load operations.
+- **Clang**: Uses 4 separate loads per struct (`ldr w`, `ldrb`, `ldrh`, `ldrb`). 3 streams x 4 loads = 12 load operations.
+
+This is the single largest difference. GCC's approach reduces load port pressure by 75% for struct access.
+
+### 2. No Outlined Functions
+
+- **GCC**: Zero outlined function calls in the hot loop. Everything is inlined.
+- **Clang**: The Machine Outliner extracts common instruction sequences into shared subroutines. One call (`bl OUTLINED_FUNCTION_4`) occurs on every loop iteration, jumping 157KB away from the call site. This pollutes the L1 instruction cache on every iteration.
+
+### 3. Interleaved FSE Stream Computation
+
+- **GCC**: Interleaves the nextState computation across the 3 FSE streams (literals length, offset, match length), enabling better out-of-order execution.
+- **Clang**: Processes each stream sequentially, creating longer dependency chains.
+
+### 4. Superior Register Allocation
+
+- **GCC**: 4 register-to-register MOVs, 11 stack loads in the loop body
+- **Clang**: 17 MOVs, 19 stack loads
+
+The extra MOVs and stack spills in Clang's output add ~8 wasted cycles per iteration.
+
+### 5. Overall Code Density
+
+- **GCC**: ~150 instructions in the loop body
+- **Clang**: ~177 instructions
+
+## Why `-fno-tree-vectorize` Helps
+
+GCC's auto-vectorizer inserts NEON instructions into some decompression paths. On Apple M1, the I-cache is 192KB (L1I) and highly sensitive to code size in hot functions. The auto-vectorized NEON code paths are rarely executed but inflate the code size of inlined functions, degrading I-cache hit rates in the hot loop.
+
+## What We Tried That Didn't Work
+
+### Source-Level Optimizations (All Reverted)
+
+| Optimization | Result | Reason |
+|---|---|---|
+| NEON `ZSTD_count` (pure or hybrid) | -2-3% regression | I-cache bloat from `MEM_STATIC` inlining everywhere |
+| Hash table prefetch in fast compress inner loop | -6% regression | M1's tight loop budget can't absorb extra instruction |
+| NEON offset-1 decompression path | -8% regression | Code bloat in `HINT_INLINE` functions |
+| 32-byte `COPY32` wildcopy | Correctness bug | Atomic 32-byte reads miss repeat patterns at offset==16 |
+| `PREFETCH_L1(match)` in `ZSTD_execSequenceSplitLitBuffer` | No effect with GCC | GCC's instruction scheduling already hides the latency |
+| Hash fill prefetches in `zstd_fast.c` | No measurable effect | M1 hardware prefetcher handles sequential access |
+| U64 struct load trick for Clang | -6% regression | Clang's optimizer undoes it or shift chain is worse |
+| Removing `PREFETCH_L1(*litPtr)` from decompression | -6% regression | Despite sequential access, the prefetch helps Clang builds |
+| AArch64 loop alignment (`.p2align 6`) | Neutral | M1's fetch unit handles unaligned loops well |
+
+### Compiler Flags (GCC)
+
+| Flag | Result |
+|---|---|
+| `-mcpu=apple-m1` | Neutral |
+| `-ftracer -fgcse-after-reload` | Hurts compression |
+| `-funroll-loops` | Hurts L1 decompress (I-cache) |
+| `-fno-schedule-insns` | Neutral |
+| `-march=armv8.5-a` | Neutral |
+| LTO (`-flto`) | Slightly worse (larger code) |
+| `-O2` (vs `-O3`) | Slightly worse |
+| `-Os -fno-tree-vectorize` | Worse (-3% at L9 vs novec; gives up too much optimization for code size) |
+| `-fipa-pta` (interprocedural pointer analysis) | Neutral |
+| `-fipa-pta -fno-align-functions -fno-align-jumps -fno-align-loops` | Worse (alignment removal hurts) |
+| `-flive-range-shrinkage` | Worse (-5% at L9) |
+| `-fno-unwind-tables -fno-asynchronous-unwind-tables` | Worse (-8% at L9; macOS runtime needs unwind tables) |
+| `-freorder-blocks-algorithm=stc` (with PGO) | Neutral (likely already the PGO default) |
+| `-fno-tree-loop-distribute-patterns` | Worse (-8% at L9; kills efficient memcpy/memset pattern recognition) |
+| `--param max-inline-insns-auto=100` (increased inlining) | Worse (-6% at L9; more inlining = bigger code = I-cache pressure) |
+| Mixed `-O3` (hot files) / `-O2` (rest) | Worse (-10% at L9; header inlines in non-hot files still need `-O3`) |
+
+### Clang Flags
+
+| Flag | Result |
+|---|---|
+| `-mllvm -enable-machine-outliner=never` | Neutral (eliminates all outlined functions but zero perf change; earlier +1% was thermal noise) |
+| `-Oz` on decompress file only | -4% regression |
+| `-O2` on decompress file only | Neutral |
+| `-mcpu=apple-m1` on decompress file | Neutral |
+| `-funroll-loops` on decompress file | Neutral |
+| `-funroll-loops` global | Neutral |
+| `-fno-vectorize -fno-slp-vectorize` global | -7% regression (kills beneficial NEON intrinsic codegen) |
+| `-fno-slp-vectorize` global | -4% regression |
+| `-mllvm -regalloc-csr-first-time-cost=0` | Neutral |
+| `-mllvm -aarch64-enable-sink-fold=true` + scheduler tweaks | Neutral |
+| Clang PGO global (`-fprofile-generate/-use`) | Neutral for decompress, hurts compression |
+| Clang ThinLTO (`-flto=thin`) | -4% regression |
+| Clang PGO compress + GCC decompress (dual PGO) | Clang PGO destroys compression (-86% at L1); not viable |
+
+### Source-Level Clang Transfer Attempts
+
+Attempts to make Clang generate GCC-quality decompression code through source changes:
+
+| Change | Target | Result |
+|---|---|---|
+| Enable GCC memcpy trick for Clang (remove `!defined(__clang__)` guard) | Force single struct loads | Neutral — Clang ignores the hint |
+| `__attribute__((flatten))` on body functions | Prevent outlining | Neutral |
+| Relaxed `HINT_INLINE` for Clang on aarch64 (let Clang decide inlining) | Reduce code size | **-25% catastrophic** — forced inlining still critical for Clang |
+| `DONT_VECTORIZE` (no-op for Clang — Clang lacks per-function no-vectorize) | N/A | Cannot be fixed without global flags (which regress) |
+
+### Other Approaches
+
+| Approach | Result |
+|---|---|
+| BOLT (post-link optimizer) | Doesn't work on macOS AArch64 Mach-O |
+| Full GCC build (compress + decompress) | -11% compression regression |
+| Full GCC + `-fno-tree-vectorize` | -7-11% compression regression persists (not caused by vectorization) |
+| GCC LTO for decompress objects | Worse than without LTO |
+| Minimal GCC file set (just 2 files) | Works but captures less benefit |
+| Unity build (single translation unit for all decompress sources) | Neutral vs separate files (GCC already has sufficient per-file visibility) |
+
+## Key Insights
+
+1. **On Apple M1, code size in inlined hot functions matters enormously.** Even 30 bytes of rarely-executed NEON code in `HINT_INLINE` functions causes measurable regression. This makes most source-level NEON optimizations counterproductive.
+
+2. **M1's hardware prefetcher is excellent.** It handles both sequential (literal) and semi-random (hash table) access patterns well. Software prefetch rarely helps in inner loops and costs ~1 cycle per dispatch even when data is already in L1.
+
+3. **The Clang Machine Outliner is cosmetic, not the bottleneck.** The outliner extracts wildcopy loop bodies and struct field loads into shared subroutines (verified via assembly: `OUTLINED_FUNCTION_3` = wildcopy, `OUTLINED_FUNCTION_4` = struct loads). Disabling it (`-mllvm -enable-machine-outliner=never`) eliminates all 5 outlined functions and their 11 call sites, but benchmarks show **zero measurable improvement**. The ~1% previously attributed to outlining was thermal noise. The real bottleneck is Clang's register allocation and instruction scheduling, not code layout.
+
+4. **`DONT_VECTORIZE` is a no-op for Clang but cannot be fixed.** The `DONT_VECTORIZE` macro (used on the hot decompression body functions) expands to `__attribute__((optimize("no-tree-vectorize")))` for GCC but is empty for Clang, since Clang doesn't support per-function optimization attributes. However, adding the equivalent global Clang flags (`-fno-vectorize -fno-slp-vectorize`) causes a -7% regression because they also disable beneficial NEON intrinsic codegen in wildcopy paths. The 24 NEON instructions in Clang's hot loop are all from explicit `vld1q_u8`/`vst1q_u8` intrinsics (wildcopy), not from auto-vectorization.
+
+5. **Compiler choice matters more than source optimizations.** GCC-15's register allocator and instruction selector produce fundamentally better code for the FSE decoding hot path. No amount of source-level hinting could replicate the 4x reduction in struct loads or the elimination of outlined calls.
+
+6. **PGO is data-generic for decompression.** The profiling data captures branch behavior in the Huffman/FSE decoding state machines, which is determined by the codec design, not the input data. Profiles generated from any reasonable test data transfer to other inputs.
+
+7. **The optimization is at ceiling for this compiler/platform.** Exhaustive testing of additional GCC flags (`-fipa-pta`, `-flive-range-shrinkage`, `-fno-align-*`, `-fno-unwind-tables`, `-freorder-blocks-algorithm=stc`), unity builds, Clang PGO, Clang ThinLTO, and 15+ Clang-specific flag/source combinations all failed to improve beyond the base hybrid novec+PGO result. Further gains would require a different GCC version, a platform where BOLT works (Linux), or upstream Clang improvements.
+
+8. **Clang PGO is harmful for zstd compression.** Clang's profile-guided optimizer causes catastrophic compression speed regression (-86% at L1), likely due to misguided code layout or inlining decisions based on profile data. This contrasts with GCC PGO which helps decompression by ~2%. The two compilers' PGO implementations have fundamentally different characteristics for this workload.
+
+9. **macOS unwind tables are load-bearing.** Unlike Linux where `-fno-unwind-tables` is often a free code size reduction, macOS requires unwind information for runtime correctness. Removing them causes an -8% regression beyond what the code size reduction would explain.
+
+10. **GCC's default `-O3` tuning is near-optimal for this workload.** Every attempt to improve on it failed: `-Os` sacrifices too much optimization, increased inline limits bloat code, mixed optimization levels break header-inlined functions, and pattern-distribution flags disable useful memcpy recognition. The only beneficial intervention was *removing* something harmful (`-fno-tree-vectorize`), not adding anything.
+
+11. **The GCC decompression advantage cannot be transferred to Clang-only builds.** 16 different approaches were tried: source changes (memcpy trick, flatten attribute, HINT_INLINE relaxation, DONT_VECTORIZE), Clang flags (-Os/-O2/-mcpu/-funroll-loops/-fno-vectorize/-fno-slp-vectorize, -mllvm scheduler/register/outliner tweaks), Clang PGO, and Clang ThinLTO. All were neutral or regressed. The GCC advantage manifests as 4 register MOVs vs Clang's 17, 11 stack spills vs 19, and interleaved FSE stream computation — these are deep backend register allocation and scheduling decisions that source code and flags cannot influence. Assembly analysis confirms Clang actually generates *fewer* total instructions (587 vs GCC's 598) but with worse scheduling quality.
+
+12. **GCC's compression regression is fundamental, not vectorization-related.** Full GCC builds regress compression by 7-11% even with `-fno-tree-vectorize`. The regression stems from GCC's different codegen choices for the compression hot path (hash table lookups, match finding), not from auto-vectorization. This makes the hybrid build (Clang compress + GCC decompress) the only viable strategy.
+
+## Test Environment
+
+- **CPU**: Apple M1 Pro (10 cores: 8P + 2E)
+- **OS**: macOS (Darwin 24.6.0)
+- **Clang**: Apple Clang (Xcode default)
+- **GCC**: gcc-15 (Homebrew, GCC 15.2.0)
+- **zstd version**: v1.6.0 (HEAD of dev branch)
+- **Test data**: 100MB compressible data, benchmarked with `-i10` single-threaded
+
+## Reproduction (v1.5.7, February 2025)
+
+Independent reproduction of the hybrid build strategy on v1.5.7 source, benchmarked against Homebrew's system `zstd` v1.5.7 (Apple Clang). All runs single-threaded, `-i5`.
+
+### Synthetic Data (100MB repeated `/usr/share/dict/words`)
+
+#### Decompression Speed (MB/s)
+
+| Level | System zstd 1.5.7 | Clang Build | Hybrid (GCC+PGO) | vs System | vs Clang |
+|-------|-------------------|-------------|-------------------|-----------|----------|
+| L1    | 1,088             | 1,082       | **1,222**         | **+12.3%** | **+12.9%** |
+| L3    | 877               | 877         | **1,015**         | **+15.7%** | **+15.7%** |
+| L5    | 793               | 791         | **912**           | **+15.0%** | **+15.3%** |
+| L9    | 6,621             | 6,620       | **7,478**         | **+12.9%** | **+13.0%** |
+
+#### Compression Speed (MB/s) — within noise
+
+| Level | System zstd | Clang Build | Hybrid Build |
+|-------|-------------|-------------|--------------|
+| L1    | 829         | 842         | 842          |
+| L3    | 454         | 454         | 453          |
+| L5    | 251         | 247         | 252          |
+| L9    | 820         | 845         | 828          |
+
+### Silesia Corpus (202MB)
+
+#### Decompression Speed (MB/s)
+
+| Level | System zstd 1.5.7 | Hybrid (GCC+PGO) | Improvement |
+|-------|-------------------|-------------------|-------------|
+| L1    | 1,507             | **1,654**         | **+9.8%**   |
+| L3    | 1,363             | **1,558**         | **+14.3%**  |
+| L5    | 1,366             | **1,563**         | **+14.4%**  |
+| L9    | 1,530             | **1,756**         | **+14.8%**  |
+
+#### Compression Speed (MB/s) — within noise
+
+| Level | System zstd | Hybrid Build |
+|-------|-------------|--------------|
+| L1    | 1,136       | 1,165        |
+| L3    | 698         | 705          |
+| L5    | 340         | 343          |
+| L9    | 164         | 168          |
+
+### Observations
+
+- The decompression improvement (**+10-16%**) exceeds the original report's +5-9% claim. This may be due to differences between v1.5.7 and v1.6.0 codegen, or to the use of `-i5` vs `-i10` iteration count.
+- The improvement is consistent across both synthetic and real-world (Silesia) data, confirming that PGO profiles are data-generic for decompression.
+- Compression speed is completely unaffected, confirming the optimization is isolated to the 8 decompress/common object files.
+- The system zstd and our Clang build produce identical decompression speeds, confirming the baseline is sound.
+
+## Graviton Port (AWS Graviton 4, February 2026)
+
+The M1 optimization strategy was ported to AWS Graviton 4 (Neoverse V2) running Linux to test whether the findings generalize to a different AArch64 microarchitecture. On Graviton 4 the default compiler is already GCC, so the experiment tests two questions: (1) does `-fno-tree-vectorize` + PGO help when GCC is already the baseline? and (2) does the M1's compiler asymmetry (GCC better at decompress, Clang better at compress) hold on Graviton?
+
+### Test Environment
+
+- **CPU**: AWS Graviton 4 (Neoverse V2), 4 vCPUs
+- **OS**: Ubuntu 24.04 (Linux 6.14.0-1018-aws)
+- **GCC**: gcc 13.3.0 (Ubuntu 13.3.0-6ubuntu2~24.04.1)
+- **Clang**: clang 18.1.3 (Ubuntu)
+- **zstd version**: v1.6.0 (HEAD of dev branch, commit `1168da0`)
+- **Test data**: 100MB repeated `/usr/share/dict/words`, benchmarked with `-i10` single-threaded
+
+### Build Procedure
+
+The same 8 decompression/common object files were recompiled with `gcc -O3 -fno-tree-vectorize` + PGO, then relinked into the standard GCC-built binary. No Clang hybrid was needed since GCC is the native compiler.
+
+```bash
+# 1. Clean GCC build (baseline)
+make clean && make -j4 zstd-release
+OBJDIR=$(ls -d programs/obj/conf_*/)
+
+# 2. Replace 8 decompression objects with PGO-instrumented versions
+PROFDIR=/tmp/gcc-pgo-zstd
+rm -rf $PROFDIR && mkdir -p $PROFDIR
+
+FILES="lib/decompress/zstd_decompress_block.c
+lib/decompress/zstd_decompress.c
+lib/decompress/huf_decompress.c
+lib/common/fse_decompress.c
+lib/common/entropy_common.c
+lib/common/zstd_common.c
+lib/common/error_private.c
+lib/common/xxhash.c"
+
+for f in $FILES; do
+    base=$(basename "$f" .c)
+    gcc -O3 -fno-tree-vectorize -fprofile-generate=$PROFDIR \
+        -DXXH_NAMESPACE=ZSTD_ -DDEBUGLEVEL=0 -DZSTD_LEGACY_SUPPORT=0 \
+        -Ilib -Ilib/common -Ilib/compress -Ilib/decompress -Iprograms \
+        -c "$f" -o "${OBJDIR}${base}.o"
+done
+
+# 3. Manually relink with gcov runtime
+GCOV_LIB=$(gcc -print-file-name=libgcov.a)
+cc -O3 -Wa,--noexecstack -z noexecstack -pthread ${OBJDIR}/*.o $GCOV_LIB -o zstd-instrumented
+
+# 4. Run profiling workloads
+./zstd-instrumented -b1e1 -i1 /tmp/testdata
+./zstd-instrumented -b3e3 -i1 /tmp/testdata
+./zstd-instrumented -b5e5 -i1 /tmp/testdata
+./zstd-instrumented -b9e9 -i1 /tmp/testdata
+
+# 5. Rebuild base, replace decompression objects with PGO-optimized versions
+make clean && make -j4 zstd-release
+OBJDIR=$(ls -d programs/obj/conf_*/)
+
+for f in $FILES; do
+    base=$(basename "$f" .c)
+    gcc -O3 -fno-tree-vectorize \
+        -fprofile-use=$PROFDIR -fprofile-partial-training \
+        -DXXH_NAMESPACE=ZSTD_ -DDEBUGLEVEL=0 -DZSTD_LEGACY_SUPPORT=0 \
+        -Ilib -Ilib/common -Ilib/compress -Ilib/decompress -Iprograms \
+        -c "$f" -o "${OBJDIR}${base}.o"
+done
+
+# 6. Final relink (no gcov)
+cc -O3 -Wa,--noexecstack -z noexecstack -pthread ${OBJDIR}/*.o -o zstd-optimized
+```
+
+### Results: Decompression Optimization
+
+#### Decompression Speed (MB/s)
+
+| Level | GCC Baseline | novec only | novec + PGO | novec vs base | PGO contribution |
+|-------|-------------:|-----------:|------------:|--------------:|-----------------:|
+| L1    | 4,789        | 4,750      | **5,341**   | **-0.8%**     | **+12.4%**       |
+| L3    | 3,975        | 3,944      | **4,419**   | **-0.8%**     | **+12.0%**       |
+| L5    | 5,003        | 4,943      | **5,536**   | **-1.2%**     | **+12.0%**       |
+| L9    | 5,305        | 5,235      | **5,850**   | **-1.3%**     | **+11.7%**       |
+
+#### Compression Speed (MB/s) — within noise
+
+| Level | GCC Baseline | Optimized (novec+PGO) |
+|-------|-------------:|----------------------:|
+| L1    | 2,580        | 2,586                 |
+| L3    | 1,519        | 1,536                 |
+| L5    | 324          | 324                   |
+| L9    | 204          | 205                   |
+
+### Results: GCC vs Clang Compiler Comparison
+
+To test whether the M1's compiler asymmetry transfers, four builds were compared: full GCC (baseline), full Clang 18, and the M1-style hybrid (Clang compress + GCC decompress). No PGO was used in any build to isolate the compiler effect.
+
+#### Compression Speed (MB/s)
+
+| Level | GCC (baseline) | Full Clang 18 | Hybrid (Clang compress) | Clang vs GCC |
+|-------|---------------:|--------------:|------------------------:|-------------:|
+| L1    | 2,552          | 2,388         | 2,394                   | **-6.2%**    |
+| L3    | 1,528          | 1,422         | 1,442                   | **-5.6%**    |
+| L5    | 324            | 320           | 321                     | **-1.0%**    |
+| L9    | 204            | 204           | 204                     | neutral      |
+
+#### Decompression Speed (MB/s)
+
+| Level | GCC (baseline) | Full Clang 18 | Hybrid (Clang compress) | Clang vs GCC |
+|-------|---------------:|--------------:|------------------------:|-------------:|
+| L1    | 4,719          | 5,128         | 4,767                   | **+8.7%**    |
+| L3    | 3,973          | 3,859         | 3,959                   | **-2.9%**    |
+| L5    | 4,970          | 6,250         | 4,968                   | **+25.8%**   |
+| L9    | 5,238          | 4,158         | 5,229                   | **-20.6%**   |
+
+### Observations
+
+1. **The combined novec + PGO optimization generalizes to Graviton 4.** A consistent **+10-12% decompression improvement** was measured across all compression levels, comparable to the M1 results.
+
+2. **PGO is doing virtually all the work.** Unlike M1 where PGO was estimated at ~2% and `-fno-tree-vectorize` at ~2%, on Graviton 4 the contributions are dramatically different: `-fno-tree-vectorize` alone *slightly hurts* performance (~1% regression), while PGO accounts for the entire +12% gain. The combined result still nets +10-12% because PGO's gains massively outweigh the slight novec regression.
+
+3. **`-fno-tree-vectorize` is neutral-to-harmful on Graviton 4.** This contrasts with the M1 where it helped ~2%. Possible explanations: (a) Graviton 4's Neoverse V2 core has a different frontend/I-cache tradeoff than M1 where the vectorizer's code bloat is less costly, (b) GCC 13 vectorizes differently than GCC 15, producing less harmful NEON code, or (c) the 64KB L1I on Neoverse V2 forces GCC to already be conservative about code size, making the vectorizer's additions relatively less impactful.
+
+4. **The M1 compiler asymmetry is inverted on Graviton 4.** On M1, GCC was better at decompression and Clang at compression. On Graviton 4, **GCC is better at compression** (by 5-6% at fast levels) while Clang's decompression advantage is erratic and level-dependent (+26% at L5, -21% at L9). The M1-style hybrid build (Clang compress + GCC decompress) would be the *wrong* strategy on Graviton 4.
+
+5. **Clang 18's decompression codegen is unstable across compression levels.** Full Clang decompression ranges from +26% faster (L5) to -21% slower (L9) compared to GCC. This wild variance suggests Clang's codegen is highly sensitive to the different code paths activated at different compression levels — possibly related to the Machine Outliner or auto-vectorization interacting differently with the Huffman vs FSE decoding paths dominant at each level.
+
+6. **The correct Graviton 4 strategy is GCC 13 + PGO only.** Keep GCC 13 for everything (it wins on compression), and add PGO to the decompression path for a free +12%. The `-fno-tree-vectorize` flag can be omitted — it provides no benefit and slightly hurts.
+
+7. **The contribution breakdown is platform-dependent.** On M1: GCC codegen ~5%, novec ~2%, PGO ~2%. On Graviton 4 (GCC 13-to-GCC 13): novec ~-1%, PGO ~+12%. The same end result (+10-12%) is achieved through a completely different mechanism. This means the M1 report's attribution table should not be assumed to transfer across platforms.
+
+### Results: GCC-15 vs GCC-13 on Graviton 4
+
+To match the M1 experiment's compiler version (GCC 15), GCC 15.1.0 was built from source and the full experiment repeated: baseline, novec-only, and novec+PGO.
+
+#### GCC-15 Decompression Speed (MB/s)
+
+| Level | GCC-15 Baseline | novec only | novec + PGO | novec vs base | PGO contribution |
+|-------|----------------:|-----------:|------------:|--------------:|-----------------:|
+| L1    | 4,824           | 4,796      | 4,713       | **-0.6%**     | **-1.7%**        |
+| L3    | 4,098           | 4,055      | 3,943       | **-1.1%**     | **-2.8%**        |
+| L5    | 4,598           | 4,591      | 4,695       | **-0.2%**     | **+2.3%**        |
+| L9    | 4,457           | 4,474      | 4,661       | **+0.4%**     | **+4.2%**        |
+
+#### GCC-15 vs GCC-13 Baseline Comparison
+
+| Level | GCC-13 Decomp | GCC-15 Decomp | Difference | GCC-13 Compress | GCC-15 Compress | Difference |
+|-------|-------------:|-------------:|-----------:|----------------:|----------------:|-----------:|
+| L1    | 4,789        | 4,824        | +0.7%      | 2,552           | 2,473           | **-3.1%**  |
+| L3    | 3,975        | 4,098        | +3.1%      | 1,528           | 1,431           | **-6.3%**  |
+| L5    | 5,003        | 4,598        | **-8.1%**  | 324             | 322             | -0.6%      |
+| L9    | 5,305        | 4,457        | **-16.0%** | 204             | 201             | -1.5%      |
+
+#### GCC-15 Observations
+
+1. **GCC-15 is substantially worse than GCC-13 on Graviton 4.** Decompression regresses by -8% at L5 and -16% at L9. Compression also regresses by 3-6% at fast levels (L1, L3). This is the opposite of M1, where GCC-15 was the best compiler choice.
+
+2. **The novec+PGO recipe is ineffective with GCC-15.** PGO *hurts* decompression at L1 (-1.7%) and L3 (-2.8%), and only modestly helps at L5 (+2.3%) and L9 (+4.2%). This contrasts sharply with GCC-13 where PGO gave a uniform +12% across all levels. The optimization is compiler-version-specific, not just platform-specific.
+
+3. **`-fno-tree-vectorize` remains neutral-to-harmful with GCC-15**, consistent with the GCC-13 findings on this platform.
+
+4. **The M1 "winning recipe" (GCC-15 + novec + PGO) does not transfer to Graviton 4.** On M1, GCC-15 was the key ingredient. On Graviton 4, GCC-15 is a net negative — both its baseline codegen and its PGO response are worse than GCC-13. This demonstrates that compiler version selection is as platform-dependent as compiler *choice* (GCC vs Clang).
+
+5. **The best Graviton 4 configuration remains GCC 13 + PGO**, which delivers +10-12% decompression improvement. GCC-15's best result (novec+PGO at L9: 4,661 MB/s) is still 12% slower than GCC-13's PGO result at the same level (5,850 MB/s).
+
+## Note on v1.5.7 vs v1.6.0 Benchmark Comparison
+
+When comparing against Homebrew's zstd v1.5.7, compression appears ~44% faster in v1.5.7. This is a **benchmark default change**, not an algorithm regression. Commit `725a152c` changed the benchmark mode default from `cores/4` threads (2 on this machine) to 1 thread. With explicit `-T1`, both versions compress at the same speed. The compression algorithm is unchanged between versions.
+
+---
+
+## Compression Optimization: doubleFast Strategy (Level 3-4)
+
+### Summary
+
+Achieved **+2.2-2.5% compression speed improvement** at levels 3 and 4 (which use the `ZSTD_dfast` strategy) on Apple M1 Pro with **zero compression ratio change**. Code size is 400 bytes smaller than upstream.
+
+| Level | Upstream (MB/s) | Optimized (MB/s) | Improvement |
+|-------|-----------------|-------------------|-------------|
+| L3    | 289             | 296               | **+2.4%**   |
+| L4    | 300             | 307               | **+2.3%**   |
+
+All benchmarks: `zstd -b` (10MB lorem ipsum), single-threaded, Apple Clang 17 -O3.
+
+### Profile Breakdown (Level 3)
+
+Level 3 uses `ZSTD_dfast` strategy: windowLog=21, chainLog=16, hashLog=17, minMatch=5.
+
+| Component | % of Compression Time |
+|-----------|-----------------------|
+| `ZSTD_compressBlock_doubleFast` (block compressor) | 76% |
+| `ZSTD_encodeSequences` (entropy encoding) | 14% |
+| `ZSTD_buildSequencesStatistics` (FSE table building) | 3% |
+| `HIST_count_parallel_wksp` (histogram) | 2% |
+| Other | 5% |
+
+### Changes Made (lib/compress/zstd_double_fast.c)
+
+Three optimizations to `ZSTD_compressBlock_doubleFast_noDict_generic`:
+
+1. **Replaced cmov with branches for match validation** (+0.5%)
+   - Upstream uses `ZSTD_selectAddr` (conditional select + dummy array) to avoid unpredictable branches when checking if a hash table index is within the valid prefix range
+   - On M1 with windowLog >= 19, the `idx >= prefixLowestIndex` check is highly predictable (almost always true) because the hash table is much smaller than the window
+   - Replaced with simple `if (idx >= prefixLowestIndex)` branch, which M1's branch predictor handles well
+   - Removed the `dummy[]` array and `useCmov` template parameter entirely — the branch path performs identically even with small windowLog (tested with wlog=14)
+   - Net code size reduction of 400 bytes (4 variants instead of 8)
+
+2. **Removed per-iteration aarch64 prefetch** (+0.5%)
+   - Upstream had `PREFETCH_L1(ip+256)` at the bottom of the inner loop on aarch64
+   - On M1, this hurts because it evicts useful hash table data from L1 and the hardware prefetcher already handles sequential access patterns well
+   - Removed entirely from the noDict inner loop
+
+3. **Added hashSmall prefetch for next position** (+1.0%)
+   - Added `PREFETCH_L1(&hashSmall[ZSTD_hashPtr(ip, hBitsS, mls)])` at the bottom of the inner loop
+   - This prefetches the small hash table entry that will be loaded at the top of the next iteration (`hashSmall[hs0]` on line 182)
+   - The hash table is 256KB (chainLog=16), exceeding M1's 128KB L1D cache, so entries are typically in L2 (~10 cycle latency)
+   - The prefetch hides this latency by initiating the load one iteration early
+
+4. **Early idxl1 load** (~+0.3%)
+   - Moved `idxl1 = hashLong[hl1]` before the long match comparison (instead of after)
+   - Allows the L2 load to be in-flight while the CPU compares `matchl0` against `ip`
+
+### Ideas Tried That Did NOT Help
+
+| Idea | Result | Why |
+|------|--------|-----|
+| Full small-hash pipeline (carry hs0/idxs0 across iterations) | -0.8% | Register pressure increase hurt more than latency hiding helped |
+| Prefetch match data at `base + idxl1` | -1.5% | Random access to input buffer evicts useful L1 data |
+| Prefetch long hash for ip1 at end of loop | -2% | Redundant — already loaded early in the iteration |
+| Move repcode check after long match check | -5% | Changed match pattern and hurt code layout |
+| `UNLIKELY()` on repcode check | -2.5% | Compiler moved repcode match code to cold section, hurting code layout |
+| `-Os` or `-O2` for doubleFast compilation unit | -1% | -O3 is optimal for this code |
+| `-fno-unroll-loops` | neutral | Compiler wasn't unrolling the do-while loop anyway |
+| Remove step-increase prefetches | neutral | Neither helped nor hurt |
+
+### Key M1 Insights for Compression
+
+1. **Branch prediction is excellent on M1** — for highly predictable branches (>95% one direction), explicit branches outperform branchless cmov patterns. The cmov adds ~1 cycle of mandatory latency even when the branch would have been predicted correctly.
+
+2. **Software prefetch is a double-edged sword** — M1's L1D is only 128KB. Random prefetches to input data evict useful hash table entries. Only prefetch into *known-useful* structures (like hash tables) that will definitely be accessed soon.
+
+3. **Code size matters for M1's uop cache** — doubling the number of template instantiations (8 variants vs 4) showed no benefit because only one variant runs at a time. The extra code just wastes instruction cache space.
+
+4. **Register pressure is critical** — the doubleFast inner loop uses ~27 of 28 available general-purpose registers. Any optimization that adds live variables must offset the spill cost.

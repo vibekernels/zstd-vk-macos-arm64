@@ -142,14 +142,9 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
     const BYTE* matchl0; /* the long match for ip */
     const BYTE* matchs0; /* the short match for ip */
     const BYTE* matchl1; /* the long match for ip1 */
-    const BYTE* matchs0_safe; /* matchs0 or safe address */
 
     const BYTE* ip = istart; /* the current position */
     const BYTE* ip1; /* the next position */
-    /* Array of ~random data, should have low probability of matching data
-     * we load from here instead of from tables, if matchl0/matchl1 are
-     * invalid indices. Used to avoid unpredictable branches. */
-    const BYTE dummy[] = {0x12,0x34,0x56,0x78,0x9a,0xbc,0xde,0xf0,0xe2,0xb4};
 
     DEBUGLOG(5, "ZSTD_compressBlock_doubleFast_noDict_generic");
 
@@ -196,29 +191,22 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
 
             hl1 = ZSTD_hashPtr(ip1, hBitsL, 8);
 
-            /* idxl0 > prefixLowestIndex is a (somewhat) unpredictable branch.
-             * However expression below complies into conditional move. Since
-             * match is unlikely and we only *branch* on idxl0 > prefixLowestIndex
-             * if there is a match, all branches become predictable. */
-            {   const BYTE*  const matchl0_safe = ZSTD_selectAddr(idxl0, prefixLowestIndex, matchl0, &dummy[0]);
-
-                /* check prefix long match */
-                if (MEM_read64(matchl0_safe) == MEM_read64(ip) && matchl0_safe == matchl0) {
-                    mLength = ZSTD_count(ip+8, matchl0+8, iend) + 8;
-                    offset = (U32)(ip-matchl0);
-                    while (((ip>anchor) & (matchl0>prefixLowest)) && (ip[-1] == matchl0[-1])) { ip--; matchl0--; mLength++; } /* catch up */
-                    goto _match_found;
-            }   }
-
+            /* Start loading idxl1 early to overlap with long match check.
+             * hashLong[hl1] is likely an L2 hit, so we want the load
+             * in-flight while we compare matchl0. */
             idxl1 = hashLong[hl1];
+
+            if ((idxl0 >= prefixLowestIndex) && (MEM_read64(matchl0) == MEM_read64(ip))) {
+                mLength = ZSTD_count(ip+8, matchl0+8, iend) + 8;
+                offset = (U32)(ip-matchl0);
+                while (((ip>anchor) & (matchl0>prefixLowest)) && (ip[-1] == matchl0[-1])) { ip--; matchl0--; mLength++; }
+                goto _match_found;
+            }
+
             matchl1 = base + idxl1;
 
-            /* Same optimization as matchl0 above */
-            matchs0_safe = ZSTD_selectAddr(idxs0, prefixLowestIndex, matchs0, &dummy[0]);
-
-            /* check prefix short match */
-            if(MEM_read32(matchs0_safe) == MEM_read32(ip) && matchs0_safe == matchs0) {
-                  goto _search_next_long;
+            if ((idxs0 >= prefixLowestIndex) && (MEM_read32(matchs0) == MEM_read32(ip))) {
+                goto _search_next_long;
             }
 
             if (ip1 >= nextStep) {
@@ -233,9 +221,10 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
             hl0 = hl1;
             idxl0 = idxl1;
             matchl0 = matchl1;
-    #if defined(__aarch64__)
-            PREFETCH_L1(ip+256);
-    #endif
+            /* Prefetch next position's small hash table entry to hide
+             * L2 latency for the hashSmall lookup at the top of the
+             * next iteration. */
+            PREFETCH_L1(&hashSmall[ZSTD_hashPtr(ip, hBitsS, mls)]);
         } while (ip1 <= ilimit);
 
 _cleanup:
