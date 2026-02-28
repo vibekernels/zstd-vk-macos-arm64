@@ -426,7 +426,33 @@ To match the M1 experiment's compiler version (GCC 15), GCC 15.1.0 was built fro
 
 ## Note on v1.5.7 vs v1.6.0 Benchmark Comparison
 
-When comparing against Homebrew's zstd v1.5.7, compression appears ~44% faster in v1.5.7. This is a **benchmark default change**, not an algorithm regression. Commit `725a152c` changed the benchmark mode default from `cores/4` threads (2 on this machine) to 1 thread. With explicit `-T1`, both versions compress at the same speed. The compression algorithm is unchanged between versions.
+When comparing against Homebrew's zstd v1.5.7, compression appears ~44% faster in v1.5.7. This is a **benchmark default change**, not an algorithm regression.
+
+### Root Cause
+
+Bisected to upstream commit `725a152c` ("benchmark uses 1 thread by default"). Before this change, `zstd -b` used `cores/4` threads (2-3 on M1 Pro). After, it defaults to 1 thread. The compression algorithm itself is identical.
+
+Confirmed by explicit thread control:
+- `zstd-vk -b1 -T4`: **1,399 MB/s** (faster than 1.5.7 default)
+- `zstd 1.5.7 -b1 -T1`: **426 MB/s** (matches zstd-vk single-threaded)
+
+### Homebrew zstd-vk vs Homebrew zstd Benchmark (v0.2.0)
+
+Apples-to-apples single-threaded comparison on 17MB test file (5x `/usr/share/dict`):
+
+| Level | zstd 1.5.7 Decompress | zstd-vk 1.6.0 Decompress | Delta |
+|-------|----------------------|-------------------------|-------|
+| 1 | 1,104 MB/s | **1,265 MB/s** | **+14.6%** |
+| 2 | 965 MB/s | **1,136 MB/s** | **+17.7%** |
+| 3 | 875 MB/s | **1,046 MB/s** | **+19.6%** |
+| 4 | 855 MB/s | **1,024 MB/s** | **+19.8%** |
+| 5 | 794 MB/s | **935 MB/s** | **+17.8%** |
+| 6 | 842 MB/s | **977 MB/s** | **+16.0%** |
+| 7 | 839 MB/s | **974 MB/s** | **+16.1%** |
+| 8 | 886 MB/s | **1,027 MB/s** | **+15.9%** |
+| 9 | 3,311 MB/s | **4,576 MB/s** | **+38.2%** |
+
+Compression speed is identical when thread count is controlled. Decompression is **+15-20% faster** at typical levels, **+38% at level 9**.
 
 ---
 
