@@ -538,6 +538,14 @@ Three optimizations to `ZSTD_compressBlock_doubleFast_noDict_generic`:
 | Remove hashLong complementary insertion (keep hashSmall only) | +1.4% speed, -2.4% ratio | Reduces post-match work (3 fewer hash computes + stores); but hashLong insertions are essential for finding long matches at nearby positions |
 | Hand-modified assembly: interleave hashLong with repcode check | neutral (298.7 vs 298.2 baseline) | Moved `ldr x30, [x6]` (ip1 data load) and `mul x28, x30, x21` (hashLong hash) before the repcode `cmp`/`b.eq`, starting the hashLong critical path ~6 cycles earlier. OoO engine already reorders these identically — explicit scheduling adds no benefit |
 | Hand-modified assembly: hashLong prefetch at loop bottom | neutral (297.7 vs 298.2 baseline) | Added `mul/lsr/add/prfm` for hashLong after the existing hashSmall prefetch at LBB1_381. The prefetch doesn't fire early enough: only ~5 cycles of lead time before the L2 load, insufficient for the ~10-cycle L2 latency |
+| GCC-15 for zstd_double_fast.c only | -2.4% (290.7 MB/s) | GCC generates worse compression code than Clang; also tried with `-fno-tree-vectorize`: -3% (289.2 MB/s) |
+| 2-ahead hashLong prefetch at loop bottom | -0.9% (295.4 MB/s) | Prefetch `hashLong[hash(ip1)]` with `ip1 <= ilimit` guard; extra instructions and insufficient lead time |
+| Skip hashLong write in inner loop | -3.2% speed (288.5), -2.6% ratio (3.267) | Removed `hashLong[hl0] = curr` to save a store; fewer long match entries means more iterations AND worse ratio |
+| `restrict` on hash table pointers | neutral (zero asm diff) | Added `restrict` to hashLong/hashSmall declarations; Clang already knows they don't alias |
+| `#pragma clang loop unroll_count(2)` | neutral (297.6 MB/s) | Pragma likely ineffective because inner loop has `goto` exits that prevent mechanical unrolling |
+| Early ip1 long match check before advance | -1% (294.6 MB/s) | Check `matchl1 == ip1` before step management; extra branch in the common (no-match) path hurts |
+| Inline matchFound in ZSTD_fast (L1) | neutral (363.3 vs 362.6) | Replace function pointer with direct code; Clang already devirtualizes and inlines it |
+| Hash table prefetch for ZSTD_fast (L1) | neutral (361.7 vs 362.6) | L1 hash table is only 64KB, fits entirely in M1's 128KB L1D; no L2 misses to hide |
 
 ### Key M1 Insights for Compression
 
@@ -561,7 +569,22 @@ Three optimizations to `ZSTD_compressBlock_doubleFast_noDict_generic`:
 
 10. **Hand-written assembly cannot beat M1's out-of-order engine** — Two assembly modifications were tested on the mls=5 inner loop: (a) interleaving the hashLong computation (ip1 data load + multiply) with the repcode check to start the critical path ~6 cycles earlier, and (b) adding a hashLong prefetch at the loop bottom alongside the existing hashSmall prefetch. Both were neutral within noise (~0.2%). The M1's reorder buffer (~630 entries) can see ~25 iterations ahead at ~25 instructions/iteration, providing more than enough window to overlap L2 misses with useful work. All 30 GP registers are in use (x18 is Apple's platform register), leaving no room for software pipelining. Loop header alignment was confirmed at 16-byte boundary (no fetch penalty).
 
-11. **CRC32C is not faster than multiply on Apple M1** — despite the CRC32C instruction (`crc32cx`) being advertised as low-latency on ARM, benchmarking shows the same 3-cycle latency as integer multiply. Critically, the multiply unit can sustain 2 ops/cycle throughput while the CRC32C unit is limited to 1/cycle. Since the doubleFast inner loop needs 3 hash computations per iteration, this throughput bottleneck causes a -7% regression.
+11. **GCC-15 generates worse compression code than Clang on M1** — compiling just `zstd_double_fast.c` with GCC-15 instead of Clang gives -2.4% speed (290.7 vs 298 MB/s). Adding `-fno-tree-vectorize` makes it even worse (-3%, 289.2 MB/s). This is consistent with the full-build finding that GCC hurts compression by 7-11%.
+
+12. **ZSTD_fast (level 1) is already well-optimized** — The level 1 hot function processes 2 positions per iteration with interleaved hash pipelining. Its 64KB hash table fits in M1's 128KB L1D, so prefetching doesn't help. Clang already devirtualizes the `matchFound` function pointer, so inlining it manually has no effect. Level 1 baseline: 362.6 MB/s on 10MB lorem ipsum.
+
+13. **CRC32C is not faster than multiply on Apple M1** — despite the CRC32C instruction (`crc32cx`) being advertised as low-latency on ARM, benchmarking shows the same 3-cycle latency as integer multiply. Critically, the multiply unit can sustain 2 ops/cycle throughput while the CRC32C unit is limited to 1/cycle. Since the doubleFast inner loop needs 3 hash computations per iteration, this throughput bottleneck causes a -7% regression.
+
+### Silesia Corpus Compression Benchmarks (Optimized Build)
+
+Levels 1-4 on 202MB Silesia corpus with our committed optimizations (Apple Clang, single-threaded):
+
+| Level | Speed (MB/s) | Ratio |
+|-------|-------------:|------:|
+| L1    | 587.9        | 2.895 |
+| L2    | 454.5        | 3.058 |
+| L3    | 366.8        | 3.205 |
+| L4    | 333.6        | 3.263 |
 
 ### Untried Future Ideas
 
