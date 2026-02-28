@@ -145,6 +145,15 @@ GCC's auto-vectorizer inserts NEON instructions into some decompression paths. O
 | Clang ThinLTO (`-flto=thin`) | -4% regression |
 | Clang PGO compress + GCC decompress (dual PGO) | Clang PGO destroys compression (-86% at L1); not viable |
 
+### Clang 21 Flag Retests
+
+The following flags were retested with Clang 21 (LLVM 21) to check whether the newer backend changes the results. All benchmarks: Silesia 202MB, `-i5`, interleaved A/B with 3 runs.
+
+| Flag | Apple Clang 17 Result | Clang 21 Result | Notes |
+|---|---|---|---|
+| ThinLTO (`-flto=thin`) | -4% decompress | **Neutral** (compress 366-370, decompress 1571-1587 vs baseline 367-368/1571-1576) | No longer harmful, but no benefit either |
+| PGO (`-fprofile-generate/-use`) | -86% L1 compress, neutral decompress | **Neutral compress, +1-2% decompress** (compress 366-367 vs 367-368; decompress 1591-1609 vs 1571-1576) | The catastrophic compression regression is gone in LLVM 21. Modest decompress gain not worth PGO build complexity |
+
 ### Source-Level Clang Transfer Attempts
 
 Attempts to make Clang generate GCC-quality decompression code through source changes:
@@ -183,7 +192,7 @@ Attempts to make Clang generate GCC-quality decompression code through source ch
 
 7. **The optimization is at ceiling for this compiler/platform.** Exhaustive testing of GCC flags, unity builds, Clang PGO, Clang ThinLTO, and 15+ Clang-specific flag/source combinations all failed to improve beyond the Clang 21 result. The breakthrough came from a newer LLVM version (Clang 21), not from flags or source changes — validating the prediction that "upstream Clang improvements" were the remaining path forward.
 
-8. **Clang PGO is harmful for zstd compression.** Clang's profile-guided optimizer causes catastrophic compression speed regression (-86% at L1), likely due to misguided code layout or inlining decisions based on profile data. This contrasts with GCC PGO which helps decompression by ~2%. The two compilers' PGO implementations have fundamentally different characteristics for this workload.
+8. **Clang PGO behavior is version-dependent.** Apple Clang 17's PGO caused a catastrophic -86% L1 compression regression. Clang 21's PGO fixes this entirely (compression neutral) and provides a modest +1-2% decompression improvement. However, the gain is too small to justify the PGO build complexity. GCC PGO remains more impactful (+12% on Graviton 4).
 
 9. **macOS unwind tables are load-bearing.** Unlike Linux where `-fno-unwind-tables` is often a free code size reduction, macOS requires unwind information for runtime correctness. Removing them causes an -8% regression beyond what the code size reduction would explain.
 
