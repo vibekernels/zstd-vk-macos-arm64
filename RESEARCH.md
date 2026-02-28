@@ -2,16 +2,18 @@
 
 ## Executive Summary
 
-We achieved **+5-9% decompression speed improvement** on Apple M1 Pro (AArch64) across all compression levels with no compression penalty and zero source code changes. The improvement comes entirely from a hybrid build strategy: compiling decompression code with GCC-15 instead of Apple Clang.
+We achieved **+15.6% decompression speed improvement** on Apple M1 Pro (AArch64) with no compression penalty, by building with Homebrew Clang 21 instead of Apple Clang 17.
 
-| Level | Clang Baseline (MB/s) | Hybrid Build (MB/s) | Improvement |
-|-------|-----------------------|---------------------|-------------|
-| L1    | 8,787                 | 9,220               | **+4.9%**   |
-| L3    | 8,481                 | 8,913               | **+5.1%**   |
-| L5    | 8,340                 | 8,971               | **+7.6%**   |
-| L9    | 10,032                | 11,006              | **+9.7%**   |
+| Metric | Apple Clang 17 (MB/s) | Clang 21 (MB/s) | Improvement |
+|--------|-----------------------|-----------------|-------------|
+| Compression (L3, Silesia) | 366 | 368 | **+0.5%** |
+| Decompression (L3, Silesia) | 1,359 | 1,571 | **+15.6%** |
 
-Compression speed is unaffected (within noise). All benchmarks use `-i10` on 100MB compressible data, single-threaded.
+All benchmarks use `-i5` on 202MB Silesia corpus tar, single-threaded, interleaved A/B.
+
+Additionally, source-level optimizations to the compression hot path (doubleFast) provide +2.4% compression speed across all compiler choices.
+
+**Previous approach (superseded):** A GCC-15 hybrid build for decompression-only files provided +5-9% decompression. This is now superseded by the simpler Clang 21 full build which provides even better results.
 
 ## Build Strategy
 
@@ -552,8 +554,8 @@ Three optimizations to `ZSTD_compressBlock_doubleFast_noDict_generic`:
 | Store-hint prefetch (`pstl1keep`) for hashSmall | neutral (296.8 vs ~298) | Changed `prfm pldl1keep` to `prfm pstl1keep` since we both read and write the entry; no difference on M1's coherency protocol |
 | `__attribute__((flatten))` on doubleFast | -1.3% (294.0 MB/s) | Force full inlining of all callees (ZSTD_count, ZSTD_storeSeq, etc.); code bloat hurts I-cache |
 | `-Ofast` (`-O3 -ffast-math`) for doubleFast | -2% (292.2 MB/s) | Fast-math flags change codegen decisions that hurt instruction scheduling or layout |
-| Clang 21 (Homebrew) for doubleFast | -1% (295.2 MB/s) | Homebrew Clang 21.1.8 generates slightly worse code than Apple Clang 17 for this function; Apple's hardware tuning matters |
-| Clang 21 + PGO for doubleFast | -0.7% (296.1 MB/s) | PGO doesn't overcome Clang 21's baseline disadvantage vs Apple Clang 17 |
+| Clang 21 (Homebrew) for doubleFast only | -1% (295.2 MB/s) | Single-file Clang 21 recompilation was measured during thermal throttling; full-build A/B test shows Clang 21 is +0.7% faster (see insight #13 correction) |
+| Clang 21 + PGO for doubleFast | -0.7% (296.1 MB/s) | PGO doesn't improve over Clang 21 baseline for a single file |
 | Clang PGO (Apple Clang 17) for doubleFast only | neutral (298.1 vs ~298) | Single-file PGO doesn't change codegen meaningfully; branch predictions already excellent without PGO |
 | `-mllvm -enable-post-misched` for doubleFast | neutral (~299 MB/s) | Post-register-allocation machine scheduler doesn't improve over default scheduling |
 | `-mllvm -aggressive-ext-opt` for doubleFast | neutral (297.5 MB/s) | Aggressive extension optimization has no effect |
@@ -586,7 +588,7 @@ Three optimizations to `ZSTD_compressBlock_doubleFast_noDict_generic`:
 
 12. **ZSTD_fast (level 1) is already well-optimized** — The level 1 hot function processes 2 positions per iteration with interleaved hash pipelining. Its 64KB hash table fits in M1's 128KB L1D, so prefetching doesn't help. Clang already devirtualizes the `matchFound` function pointer, so inlining it manually has no effect. Level 1 baseline: 362.6 MB/s on 10MB lorem ipsum.
 
-13. **Apple Clang 17 generates the best compression code for M1** — Homebrew Clang 21 is -1% slower, and even with PGO it can't close the gap. GCC-15 is -2.4% slower. Apple's tuning of their bundled Clang for Apple Silicon hardware makes a measurable difference. Compiler version selection for compression is the opposite of decompression (where GCC-15 wins).
+13. **CORRECTION: Clang 21 matches or beats Apple Clang 17 for compression AND is +15.6% faster for decompression** — Earlier measurements showing Clang 21 -1% were taken during thermal throttling (absolute speeds 289-298 MB/s vs normal 365-370 MB/s). A controlled interleaved A/B test at thermal equilibrium shows: Apple Clang compress 366 MB/s / decompress 1359 MB/s vs Clang 21 compress 368 MB/s (+0.5%) / decompress 1571 MB/s (+15.6%). Assembly diff of the mls=5 doubleFast inner loop confirms near-identical code: 2900 vs 2902 instructions, same opcode distribution (only 6 fewer `ldp` in Clang 21 due to different stack layout). The decompression improvement comes from LLVM 21's improved backend, not any specific flag. **Clang 21 is strictly superior to Apple Clang 17 for zstd on M1.** GCC-15 remains -2.4% for compression but its decompression advantage is now moot since Clang 21 provides even better decompression (+15.6% vs GCC's +5-9%).
 
 14. **The encoding loop's backward access pattern is handled by M1's HW prefetcher** — Adding software prefetch for backward-walking sequences and code tables hurts (-0.9%). M1's hardware prefetcher recognizes and handles both forward and backward sequential access patterns efficiently.
 
