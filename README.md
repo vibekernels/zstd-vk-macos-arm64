@@ -10,7 +10,8 @@ brew install zstd-vk
 ## Build from source
 
 ```bash
-make
+brew install llvm
+make CC=$(brew --prefix llvm)/bin/clang
 ```
 
 ## License

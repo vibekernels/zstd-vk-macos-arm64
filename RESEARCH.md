@@ -17,72 +17,25 @@ Additionally, source-level optimizations to the compression hot path (doubleFast
 
 ## Build Strategy
 
+Build the full project with Homebrew Clang 21:
+
+```bash
+brew install llvm
+make CC=$(brew --prefix llvm)/bin/clang
+```
+
+This is strictly superior to Apple Clang 17 on M1: +0.5% compression, +15.6% decompression. The `-mcpu=apple-m1` flag was tested and makes no measurable difference.
+
+<details>
+<summary>Historical: GCC-15 hybrid build (superseded by Clang 21)</summary>
+
+The previous approach used GCC-15 for decompression-only files with PGO, achieving +5-9% decompression. This is now superseded by the simpler Clang 21 full build which provides even better results (+15.6%).
+
 ### Overview
 
 1. Build the full project normally with Apple Clang (`make -j zstd-release`)
 2. Recompile 8 decompression/common object files with GCC-15 using `-O3 -fno-tree-vectorize` and PGO
 3. Relink with the Clang linker
-
-Clang remains the compiler for all compression code (where its codegen is fine). Only the decompression hot path benefits from GCC.
-
-### Step-by-Step Build Instructions
-
-```bash
-# Prerequisites: gcc-15 installed (e.g., `brew install gcc`)
-
-# 1. Clean Clang build
-make clean && make -j zstd-release
-OBJDIR=$(ls -d programs/obj/conf_*/)
-
-# 2. Build instrumented GCC objects for PGO profiling
-PROFDIR=/tmp/gcc-pgo-zstd
-rm -rf $PROFDIR && mkdir -p $PROFDIR
-
-FILES="lib/decompress/zstd_decompress_block.c
-lib/decompress/zstd_decompress.c
-lib/decompress/huf_decompress.c
-lib/common/fse_decompress.c
-lib/common/entropy_common.c
-lib/common/zstd_common.c
-lib/common/error_private.c
-lib/common/xxhash.c"
-
-for f in $FILES; do
-    base=$(basename "$f" .c)
-    gcc-15 -O3 -fno-tree-vectorize -fprofile-generate=$PROFDIR \
-        -DXXH_NAMESPACE=ZSTD_ -DDEBUGLEVEL=0 -DZSTD_LEGACY_SUPPORT=0 \
-        -Ilib -Ilib/common -Ilib/compress -Ilib/decompress -Iprograms \
-        -c "$f" -o "${OBJDIR}${base}.o"
-done
-
-# 3. Link instrumented binary (needs libgcov for profiling runtime)
-GCOV_LIB=$(gcc-15 -print-file-name=libgcov.a)
-# Extract the link command from: make -n zstd-release
-# Then append $GCOV_LIB to link the profiling runtime
-# (The exact link command varies by platform/config)
-
-# 4. Run profiling workloads
-./zstd-instrumented -b1e1 -i1 /path/to/test_data
-./zstd-instrumented -b3e3 -i1 /path/to/test_data
-./zstd-instrumented -b5e5 -i1 /path/to/test_data
-./zstd-instrumented -b9e9 -i1 /path/to/test_data
-
-# 5. Rebuild Clang base, then recompile GCC objects with PGO feedback
-make clean && make -j zstd-release
-OBJDIR=$(ls -d programs/obj/conf_*/)
-
-for f in $FILES; do
-    base=$(basename "$f" .c)
-    gcc-15 -O3 -fno-tree-vectorize \
-        -fprofile-use=$PROFDIR -fprofile-partial-training \
-        -DXXH_NAMESPACE=ZSTD_ -DDEBUGLEVEL=0 -DZSTD_LEGACY_SUPPORT=0 \
-        -Ilib -Ilib/common -Ilib/compress -Ilib/decompress -Iprograms \
-        -c "$f" -o "${OBJDIR}${base}.o"
-done
-
-# 6. Final relink (no libgcov needed this time)
-make -j zstd-release
-```
 
 ### Contribution of Each Technique
 
@@ -91,6 +44,8 @@ make -j zstd-release
 | GCC-15 codegen (vs Clang) | ~5% |
 | `-fno-tree-vectorize` | ~2% |
 | PGO (`-fprofile-use`) | ~2% |
+
+</details>
 
 ## Why GCC Generates Faster Decompression Code
 
