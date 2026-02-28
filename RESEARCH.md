@@ -546,6 +546,18 @@ Three optimizations to `ZSTD_compressBlock_doubleFast_noDict_generic`:
 | Early ip1 long match check before advance | -1% (294.6 MB/s) | Check `matchl1 == ip1` before step management; extra branch in the common (no-match) path hurts |
 | Inline matchFound in ZSTD_fast (L1) | neutral (363.3 vs 362.6) | Replace function pointer with direct code; Clang already devirtualizes and inlines it |
 | Hash table prefetch for ZSTD_fast (L1) | neutral (361.7 vs 362.6) | L1 hash table is only 64KB, fits entirely in M1's 128KB L1D; no L2 misses to hide |
+| Remove hashSmall complementary insertion | +2.7% speed (306), -0.9% ratio (3.324) | Saves 2 hash computes + 2 stores after each match, but fewer hashSmall entries degrades short match finding |
+| Full hashSmall pipeline (carry hs0/idxs0 across iterations) | -1.4% (293.7 MB/s) | Save mul+shift at loop top by carrying hash index + loaded value from prev iteration; register pressure spills offset latency savings. Confirms previous -0.8% finding with updated code |
+| Backward prefetch in encoding loop | -0.9% (295.4 MB/s) | Added `PREFETCH_L1(sequences + n - 4)` and `PREFETCH_L1(llCodeTable + n - 8)` in backward encoding loop; M1's HW prefetcher handles backward sequential access fine |
+| Store-hint prefetch (`pstl1keep`) for hashSmall | neutral (296.8 vs ~298) | Changed `prfm pldl1keep` to `prfm pstl1keep` since we both read and write the entry; no difference on M1's coherency protocol |
+| `__attribute__((flatten))` on doubleFast | -1.3% (294.0 MB/s) | Force full inlining of all callees (ZSTD_count, ZSTD_storeSeq, etc.); code bloat hurts I-cache |
+| `-Ofast` (`-O3 -ffast-math`) for doubleFast | -2% (292.2 MB/s) | Fast-math flags change codegen decisions that hurt instruction scheduling or layout |
+| Clang 21 (Homebrew) for doubleFast | -1% (295.2 MB/s) | Homebrew Clang 21.1.8 generates slightly worse code than Apple Clang 17 for this function; Apple's hardware tuning matters |
+| Clang 21 + PGO for doubleFast | -0.7% (296.1 MB/s) | PGO doesn't overcome Clang 21's baseline disadvantage vs Apple Clang 17 |
+| Clang PGO (Apple Clang 17) for doubleFast only | neutral (298.1 vs ~298) | Single-file PGO doesn't change codegen meaningfully; branch predictions already excellent without PGO |
+| `-mllvm -enable-post-misched` for doubleFast | neutral (~299 MB/s) | Post-register-allocation machine scheduler doesn't improve over default scheduling |
+| `-mllvm -aggressive-ext-opt` for doubleFast | neutral (297.5 MB/s) | Aggressive extension optimization has no effect |
+| `-mllvm -aarch64-enable-ldst-opt` for doubleFast | neutral (295.9 MB/s) | Load/store optimization already enabled by default |
 
 ### Key M1 Insights for Compression
 
@@ -565,7 +577,7 @@ Three optimizations to `ZSTD_compressBlock_doubleFast_noDict_generic`:
 
 8. **Entropy encoding and histogram are resistant to optimization** — GCC-15 for the encoding path is neutral-to-worse. Backward sequence prefetching is neutral (data still warm from compression). The encoding loop is well-optimized by Clang.
 
-9. **The optimization is at ceiling for both source-level and assembly-level changes** — 25+ source-level ideas plus 2 hand-written assembly modifications were tested beyond the initial 4 successful optimizations. All were neutral or regressive. Assembly analysis shows the inner loop runs at ~11 cycles/iteration: the OoO engine hides ~7 cycles of the ~18-cycle hashLong dependency chain by overlapping with match checks. Hand-tuned instruction scheduling cannot improve on this. Further gains would require algorithmic restructuring (different match-finding strategy) or hardware changes.
+9. **The optimization is at ceiling for both source-level and assembly-level changes** — 40+ source-level ideas, 2 hand-written assembly modifications, and 10+ compiler flag/version experiments were tested beyond the initial 4 successful optimizations. All were neutral or regressive. Assembly analysis shows the inner loop runs at ~11 cycles/iteration: the OoO engine hides ~7 cycles of the ~18-cycle hashLong dependency chain by overlapping with match checks. Hand-tuned instruction scheduling cannot improve on this. Further gains would require algorithmic restructuring (different match-finding strategy) or hardware changes.
 
 10. **Hand-written assembly cannot beat M1's out-of-order engine** — Two assembly modifications were tested on the mls=5 inner loop: (a) interleaving the hashLong computation (ip1 data load + multiply) with the repcode check to start the critical path ~6 cycles earlier, and (b) adding a hashLong prefetch at the loop bottom alongside the existing hashSmall prefetch. Both were neutral within noise (~0.2%). The M1's reorder buffer (~630 entries) can see ~25 iterations ahead at ~25 instructions/iteration, providing more than enough window to overlap L2 misses with useful work. All 30 GP registers are in use (x18 is Apple's platform register), leaving no room for software pipelining. Loop header alignment was confirmed at 16-byte boundary (no fetch penalty).
 
@@ -573,7 +585,13 @@ Three optimizations to `ZSTD_compressBlock_doubleFast_noDict_generic`:
 
 12. **ZSTD_fast (level 1) is already well-optimized** — The level 1 hot function processes 2 positions per iteration with interleaved hash pipelining. Its 64KB hash table fits in M1's 128KB L1D, so prefetching doesn't help. Clang already devirtualizes the `matchFound` function pointer, so inlining it manually has no effect. Level 1 baseline: 362.6 MB/s on 10MB lorem ipsum.
 
-13. **CRC32C is not faster than multiply on Apple M1** — despite the CRC32C instruction (`crc32cx`) being advertised as low-latency on ARM, benchmarking shows the same 3-cycle latency as integer multiply. Critically, the multiply unit can sustain 2 ops/cycle throughput while the CRC32C unit is limited to 1/cycle. Since the doubleFast inner loop needs 3 hash computations per iteration, this throughput bottleneck causes a -7% regression.
+13. **Apple Clang 17 generates the best compression code for M1** — Homebrew Clang 21 is -1% slower, and even with PGO it can't close the gap. GCC-15 is -2.4% slower. Apple's tuning of their bundled Clang for Apple Silicon hardware makes a measurable difference. Compiler version selection for compression is the opposite of decompression (where GCC-15 wins).
+
+14. **The encoding loop's backward access pattern is handled by M1's HW prefetcher** — Adding software prefetch for backward-walking sequences and code tables hurts (-0.9%). M1's hardware prefetcher recognizes and handles both forward and backward sequential access patterns efficiently.
+
+15. **`__attribute__((flatten))` and `-Ofast` hurt compression** — Flatten forces inlining of all callees (ZSTD_count, ZSTD_storeSeq), bloating the function and hurting I-cache. `-Ofast` (`-ffast-math`) changes codegen decisions that degrade instruction scheduling. Both confirm that code size and Clang's default optimization balance are critical for M1 compression performance.
+
+16. **CRC32C is not faster than multiply on Apple M1** — despite the CRC32C instruction (`crc32cx`) being advertised as low-latency on ARM, benchmarking shows the same 3-cycle latency as integer multiply. Critically, the multiply unit can sustain 2 ops/cycle throughput while the CRC32C unit is limited to 1/cycle. Since the doubleFast inner loop needs 3 hash computations per iteration, this throughput bottleneck causes a -7% regression.
 
 ### Silesia Corpus Compression Benchmarks (Optimized Build)
 
