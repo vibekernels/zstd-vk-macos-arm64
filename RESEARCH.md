@@ -47,9 +47,11 @@ The previous approach used GCC-15 for decompression-only files with PGO, achievi
 
 </details>
 
-## Why GCC Generates Faster Decompression Code
+## Why GCC Generated Faster Decompression Code (vs Apple Clang 17)
 
-Detailed assembly analysis of `ZSTD_decompressSequences_body` (the hot decompression loop) reveals five key differences:
+> **Note:** This analysis compared GCC-15 vs Apple Clang 17. Homebrew Clang 21 (LLVM 21) has since surpassed both, delivering +15.6% decompression over Apple Clang 17 — better than the GCC-15 hybrid build's +5-9%. The assembly analysis below remains interesting for understanding compiler codegen differences.
+
+Detailed assembly analysis of `ZSTD_decompressSequences_body` (the hot decompression loop) reveals five key differences between GCC-15 and Apple Clang 17:
 
 ### 1. Single-Load Struct Access
 
@@ -82,7 +84,9 @@ The extra MOVs and stack spills in Clang's output add ~8 wasted cycles per itera
 - **GCC**: ~150 instructions in the loop body
 - **Clang**: ~177 instructions
 
-## Why `-fno-tree-vectorize` Helps
+## Why `-fno-tree-vectorize` Helped (GCC Builds Only)
+
+> **Note:** This section applies to GCC builds only. The current Clang 21 build does not use this flag.
 
 GCC's auto-vectorizer inserts NEON instructions into some decompression paths. On Apple M1, the I-cache is 192KB (L1I) and highly sensitive to code size in hot functions. The auto-vectorized NEON code paths are rarely executed but inflate the code size of inlined functions, degrading I-cache hit rates in the hot loop.
 
@@ -173,11 +177,11 @@ Attempts to make Clang generate GCC-quality decompression code through source ch
 
 4. **`DONT_VECTORIZE` is a no-op for Clang but cannot be fixed.** The `DONT_VECTORIZE` macro (used on the hot decompression body functions) expands to `__attribute__((optimize("no-tree-vectorize")))` for GCC but is empty for Clang, since Clang doesn't support per-function optimization attributes. However, adding the equivalent global Clang flags (`-fno-vectorize -fno-slp-vectorize`) causes a -7% regression because they also disable beneficial NEON intrinsic codegen in wildcopy paths. The 24 NEON instructions in Clang's hot loop are all from explicit `vld1q_u8`/`vst1q_u8` intrinsics (wildcopy), not from auto-vectorization.
 
-5. **Compiler choice matters more than source optimizations.** GCC-15's register allocator and instruction selector produce fundamentally better code for the FSE decoding hot path. No amount of source-level hinting could replicate the 4x reduction in struct loads or the elimination of outlined calls.
+5. **Compiler choice matters more than source optimizations.** With Apple Clang 17, GCC-15's register allocator produced better decompression code. However, Clang 21 (LLVM 21) surpassed GCC-15's decompression codegen entirely (+15.6% vs +5-9%), demonstrating that compiler *version* matters as much as compiler *choice*.
 
 6. **PGO is data-generic for decompression.** The profiling data captures branch behavior in the Huffman/FSE decoding state machines, which is determined by the codec design, not the input data. Profiles generated from any reasonable test data transfer to other inputs.
 
-7. **The optimization is at ceiling for this compiler/platform.** Exhaustive testing of additional GCC flags (`-fipa-pta`, `-flive-range-shrinkage`, `-fno-align-*`, `-fno-unwind-tables`, `-freorder-blocks-algorithm=stc`), unity builds, Clang PGO, Clang ThinLTO, and 15+ Clang-specific flag/source combinations all failed to improve beyond the base hybrid novec+PGO result. Further gains would require a different GCC version, a platform where BOLT works (Linux), or upstream Clang improvements.
+7. **The optimization is at ceiling for this compiler/platform.** Exhaustive testing of GCC flags, unity builds, Clang PGO, Clang ThinLTO, and 15+ Clang-specific flag/source combinations all failed to improve beyond the Clang 21 result. The breakthrough came from a newer LLVM version (Clang 21), not from flags or source changes — validating the prediction that "upstream Clang improvements" were the remaining path forward.
 
 8. **Clang PGO is harmful for zstd compression.** Clang's profile-guided optimizer causes catastrophic compression speed regression (-86% at L1), likely due to misguided code layout or inlining decisions based on profile data. This contrasts with GCC PGO which helps decompression by ~2%. The two compilers' PGO implementations have fundamentally different characteristics for this workload.
 
@@ -185,9 +189,9 @@ Attempts to make Clang generate GCC-quality decompression code through source ch
 
 10. **GCC's default `-O3` tuning is near-optimal for this workload.** Every attempt to improve on it failed: `-Os` sacrifices too much optimization, increased inline limits bloat code, mixed optimization levels break header-inlined functions, and pattern-distribution flags disable useful memcpy recognition. The only beneficial intervention was *removing* something harmful (`-fno-tree-vectorize`), not adding anything.
 
-11. **The GCC decompression advantage cannot be transferred to Clang-only builds.** 16 different approaches were tried: source changes (memcpy trick, flatten attribute, HINT_INLINE relaxation, DONT_VECTORIZE), Clang flags (-Os/-O2/-mcpu/-funroll-loops/-fno-vectorize/-fno-slp-vectorize, -mllvm scheduler/register/outliner tweaks), Clang PGO, and Clang ThinLTO. All were neutral or regressed. The GCC advantage manifests as 4 register MOVs vs Clang's 17, 11 stack spills vs 19, and interleaved FSE stream computation — these are deep backend register allocation and scheduling decisions that source code and flags cannot influence. Assembly analysis confirms Clang actually generates *fewer* total instructions (587 vs GCC's 598) but with worse scheduling quality.
+11. **The GCC decompression advantage could not be transferred to Apple Clang 17 — but LLVM 21 solved it naturally.** 16 different approaches were tried with Apple Clang 17: source changes, Clang flags, PGO, and ThinLTO. All were neutral or regressed. The GCC advantage (4 register MOVs vs Clang 17's 17, 11 stack spills vs 19) stemmed from deep backend decisions that source code and flags cannot influence. Ultimately, LLVM 21's improved backend resolved this without any source-level workarounds.
 
-12. **GCC's compression regression is fundamental, not vectorization-related.** Full GCC builds regress compression by 7-11% even with `-fno-tree-vectorize`. The regression stems from GCC's different codegen choices for the compression hot path (hash table lookups, match finding), not from auto-vectorization. This makes the hybrid build (Clang compress + GCC decompress) the only viable strategy.
+12. **GCC's compression regression is fundamental, not vectorization-related.** Full GCC builds regress compression by 7-11% even with `-fno-tree-vectorize`. The regression stems from GCC's different codegen choices for the compression hot path (hash table lookups, match finding), not from auto-vectorization. With Clang 21 now beating GCC for decompression too, the hybrid build is no longer needed.
 
 ## Test Environment
 
@@ -553,7 +557,7 @@ Three optimizations to `ZSTD_compressBlock_doubleFast_noDict_generic`:
 
 ### Silesia Corpus Compression Benchmarks (Optimized Build)
 
-Levels 1-4 on 202MB Silesia corpus with our committed optimizations (Apple Clang, single-threaded):
+Levels 1-4 on 202MB Silesia corpus with our committed optimizations (Clang 21, single-threaded):
 
 | Level | Speed (MB/s) | Ratio |
 |-------|-------------:|------:|
